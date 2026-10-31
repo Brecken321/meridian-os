@@ -1,0 +1,15 @@
+﻿[package]
+name = "meridian-kernel"
+description = "The Meridian hybrid kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+meridian-bootinfo = { path = "../shared/bootinfo" }

@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["boot", "kernel", "shared/bootinfo"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/Brecken321/meridian-os"
+
+[profile.dev]
+# Unoptimised kernel code is painfully slow under QEMU's TCG emulator.
+opt-level = 1
+
+[profile.release]
+debug = "line-tables-only"

@@ -1,0 +1,10 @@
+[package]
+name = "meridian-bootinfo"
+description = "Boot handoff structures shared by the Meridian boot manager and kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+test = false
+bench = false

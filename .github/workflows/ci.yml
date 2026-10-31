@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build, boot and self-test (QEMU + UEFI)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU and UEFI firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+
+      - name: Install the Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Kernel self tests (debug build)
+        run: python3 tools/mbuild.py test
+
+      - name: Kernel self tests (release build)
+        run: python3 tools/mbuild.py test --release
+
+      - name: Boot screenshot
+        run: python3 tools/mbuild.py screenshot --release
+
+      - name: Keyboard, shell and ACPI power-off
+        run: python3 tools/mbuild.py exec help cpu mem irq shutdown --release --expect-poweroff
+
+      - name: Upload logs, screenshot and disk image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meridian-${{ github.sha }}
+          path: |
+            build/*.log
+            build/*.png
+            build/meridian.img
+          if-no-files-found: ignore
