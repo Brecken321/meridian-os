@@ -180,16 +180,29 @@ pub extern "C" fn kernel_entry(info: *const BootInfo) -> ! {
         Ok(()) => info!("ps2: keyboard ready"),
         Err(e) => warn!("ps2: {e}"),
     }
+    if hal::serial::enable_receive_interrupt() {
+        info!("serial: COM1 receive interrupt enabled");
+    }
 
+    // --- Threads -----------------------------------------------------------
+    // From here on this code is the bootstrap processor's idle thread.
+    ke::sched::init();
     info!("boot: kernel initialised in {} ms", clock::uptime_ms());
 
-    if info.has_option("selftest") {
-        let (_, failed) = selftest::run_all();
-        let code = if failed == 0 { hal::power::QEMU_EXIT_SUCCESS } else { hal::power::QEMU_EXIT_FAILURE };
-        hal::power::qemu_exit(code);
-        // Still running: not under the test harness. Fall through to the shell.
+    let selftest = info.has_option("selftest");
+    let started = ke::sched::spawn("shell", ke::thread::priority::NORMAL, move || {
+        if selftest {
+            let (_, failed) = selftest::run_all();
+            let code = if failed == 0 { hal::power::QEMU_EXIT_SUCCESS } else { hal::power::QEMU_EXIT_FAILURE };
+            hal::power::qemu_exit(code);
+            // Still running: not under the test harness. Continue to the shell.
+        }
+        shell::run()
+    });
+    if let Err(e) = started {
+        panic!("cannot start the shell thread: {e}");
     }
-    shell::run()
+    ke::sched::idle_loop()
 }
 
 /// Loads the bootstrap processor's GDT/TSS (with interrupt stacks) and
@@ -216,6 +229,7 @@ fn clock_interrupt(_: &mut TrapFrame) {
     if p.index == 0 {
         clock::tick();
     }
+    ke::sched::clock_tick(p);
 }
 
 fn apic_error_interrupt(_: &mut TrapFrame) {

@@ -200,6 +200,9 @@ extern "C" fn kernel_trap_dispatch(frame: &mut TrapFrame) {
 
     pcr::current().interrupts.fetch_add(1, Ordering::Relaxed);
     let old_irql = irql::raise((vector >> 4) as irql::Irql);
+    if vector == vectors::DISPATCH as usize {
+        apic::eoi();
+    }
     let handler = HANDLERS[vector].load(Ordering::Acquire);
     if handler != 0 {
         // SAFETY: only `Handler` values are ever stored in HANDLERS.

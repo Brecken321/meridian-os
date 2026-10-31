@@ -9,12 +9,17 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::x86_64::idt::{self, TrapFrame, fixup};
 use crate::arch::x86_64::{apic, cpu};
 use crate::hal::{acpi, hpet, pci};
+use crate::ke::dpc::Dpc;
+use crate::ke::objects::{Event, Mutex, Semaphore};
+use crate::ke::sched::{self, WaitStatus};
+use crate::ke::thread::{Thread, ThreadState, priority};
 use crate::ke::{clock, irql};
 use crate::mm::{PAGE_SIZE, kva, paging, phys_to_virt, pmm};
 use crate::sync::SpinLock;
@@ -54,6 +59,18 @@ const TESTS: &[Test] = &[
     Test { name: "acpi.tables", run: acpi_tables },
     Test { name: "pci.enumeration", run: pci_enumeration },
     Test { name: "ps2.decode", run: ps2_decode },
+    Test { name: "dpc.deferred_until_irql_drops", run: dpc_deferred },
+    Test { name: "sched.spawn_join", run: sched_spawn_join },
+    Test { name: "sched.many_threads", run: sched_many_threads },
+    Test { name: "sched.time_slicing", run: sched_time_slicing },
+    Test { name: "sched.priority_preemption", run: sched_priority_preemption },
+    Test { name: "sched.sleep", run: sched_sleep },
+    Test { name: "sched.stack_reclaimed", run: sched_stack_reclaimed },
+    Test { name: "sync.event", run: sync_event },
+    Test { name: "sync.event_timeout", run: sync_event_timeout },
+    Test { name: "sync.notification_event", run: sync_notification_event },
+    Test { name: "sync.mutex", run: sync_mutex },
+    Test { name: "sync.semaphore", run: sync_semaphore },
 ];
 
 /// Runs every test; returns (passed, failed).
@@ -329,5 +346,243 @@ fn ps2_decode() -> TestResult {
     ps2::read_event(); // shift release
     let e = ps2::read_event().ok_or("no event")?;
     ensure!(e.key == Key::Up, "expected Up, got {:?}", e.key);
+    Ok(())
+}
+
+static DPC_RUNS: AtomicU64 = AtomicU64::new(0);
+static TEST_DPC: Dpc = Dpc::new(|| {
+    DPC_RUNS.fetch_add(1, Ordering::Relaxed);
+});
+
+fn dpc_deferred() -> TestResult {
+    let before = DPC_RUNS.load(Ordering::Relaxed);
+    let old = irql::raise(irql::HIGH_LEVEL);
+    TEST_DPC.queue();
+    TEST_DPC.queue(); // already queued: must not run twice
+    clock::busy_wait_us(500);
+    let early = DPC_RUNS.load(Ordering::Relaxed) != before;
+    irql::lower(old);
+    ensure!(!early, "DPC ran while IRQL was HIGH");
+    ensure!(DPC_RUNS.load(Ordering::Relaxed) == before + 1, "DPC did not run exactly once after IRQL dropped");
+    Ok(())
+}
+
+fn join(t: &Thread, ms: u64) -> TestResult {
+    ensure!(t.terminated.wait(Some(ms)) == WaitStatus::Signaled, "thread '{}' did not finish within {ms} ms", t.name());
+    ensure!(t.state() == ThreadState::Terminated, "thread '{}' is {:?}", t.name(), t.state());
+    Ok(())
+}
+
+fn sched_spawn_join() -> TestResult {
+    let value = Arc::new(AtomicU64::new(0));
+    let v = value.clone();
+    let t = sched::spawn("test-join", priority::NORMAL, move || v.store(42, Ordering::Relaxed))?;
+    join(&t, 1000)?;
+    ensure!(value.load(Ordering::Relaxed) == 42, "thread body did not run");
+    ensure!(sched::current_id() != t.id, "thread ids are not unique");
+    Ok(())
+}
+
+fn sched_many_threads() -> TestResult {
+    let counter = Arc::new(AtomicU64::new(0));
+    let mut threads = Vec::new();
+    for _ in 0..16 {
+        let c = counter.clone();
+        threads.push(sched::spawn("test-many", priority::NORMAL, move || {
+            for i in 0..100 {
+                c.fetch_add(1, Ordering::Relaxed);
+                if i % 10 == 0 {
+                    sched::yield_now();
+                }
+            }
+        })?);
+    }
+    for t in &threads {
+        join(t, 5000)?;
+    }
+    ensure!(counter.load(Ordering::Relaxed) == 1600, "counter is {}", counter.load(Ordering::Relaxed));
+    Ok(())
+}
+
+fn sched_time_slicing() -> TestResult {
+    // Two threads that never yield. Without preemptive time slicing the
+    // second one (and this one) would never run again.
+    let stop = Arc::new(AtomicBool::new(false));
+    let counts = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
+    let mut threads = Vec::new();
+    for i in 0..2 {
+        let (stop, counts) = (stop.clone(), counts.clone());
+        threads.push(sched::spawn("test-spin", priority::NORMAL, move || {
+            while !stop.load(Ordering::Relaxed) {
+                counts[i].fetch_add(1, Ordering::Relaxed);
+            }
+        })?);
+    }
+    sched::sleep_ms(100);
+    stop.store(true, Ordering::Relaxed);
+    for t in &threads {
+        join(t, 2000)?;
+    }
+    let (a, b) = (counts[0].load(Ordering::Relaxed), counts[1].load(Ordering::Relaxed));
+    ensure!(a > 0 && b > 0, "spinning threads did not share the CPU ({a} vs {b} iterations)");
+    Ok(())
+}
+
+fn sched_priority_preemption() -> TestResult {
+    let ran = Arc::new(AtomicBool::new(false));
+    let r = ran.clone();
+    let t = sched::spawn("test-high", priority::HIGH, move || r.store(true, Ordering::Relaxed))?;
+    // A higher-priority thread must run immediately (on this or another
+    // processor) without this thread yielding.
+    let deadline = clock::uptime_us() + 5000;
+    while !ran.load(Ordering::Relaxed) && clock::uptime_us() < deadline {
+        core::hint::spin_loop();
+    }
+    ensure!(ran.load(Ordering::Relaxed), "higher-priority thread did not preempt");
+    join(&t, 1000)
+}
+
+fn sched_sleep() -> TestResult {
+    let t0 = clock::uptime_us();
+    sched::sleep_ms(30);
+    let dt = clock::uptime_us() - t0;
+    ensure!(dt >= 30_000, "slept only {dt} us");
+    ensure!(dt < 500_000, "slept {dt} us for a 30 ms sleep");
+    Ok(())
+}
+
+fn sched_stack_reclaimed() -> TestResult {
+    // Check that creating and destroying threads does not leak memory.
+    sched::sleep_ms(5);
+    let (before, _) = pmm::stats();
+    for _ in 0..20 {
+        let t = sched::spawn("test-reap", priority::NORMAL, || {})?;
+        join(&t, 1000)?;
+        drop(t);
+        sched::yield_now();
+    }
+    sched::sleep_ms(5);
+    let (after, _) = pmm::stats();
+    // The pool may keep a few pages for its size classes.
+    ensure!(before.abs_diff(after) <= 8 * PAGE_SIZE, "leaked {} KiB", (before as i64 - after as i64) / 1024);
+    Ok(())
+}
+
+fn sync_event() -> TestResult {
+    let ev = Arc::new(Event::new(false, false));
+    let woke = Arc::new(AtomicU64::new(0));
+    let (e, w) = (ev.clone(), woke.clone());
+    let t = sched::spawn("test-event", priority::NORMAL, move || {
+        if e.wait(Some(2000)) == WaitStatus::Signaled {
+            w.store(1, Ordering::Relaxed);
+        }
+    })?;
+    sched::sleep_ms(20);
+    ensure!(woke.load(Ordering::Relaxed) == 0, "waiter woke before the event was set");
+    ensure!(t.state() == ThreadState::Waiting, "waiter is {:?}, expected Waiting", t.state());
+    ev.set();
+    join(&t, 1000)?;
+    ensure!(woke.load(Ordering::Relaxed) == 1, "waiter was not released by set()");
+    ensure!(!ev.is_set(), "auto-reset event stayed set after releasing a waiter");
+    Ok(())
+}
+
+fn sync_event_timeout() -> TestResult {
+    let ev = Event::new(false, false);
+    let t0 = clock::uptime_us();
+    ensure!(ev.wait(Some(25)) == WaitStatus::Timeout, "wait on an unset event did not time out");
+    let dt = clock::uptime_us() - t0;
+    ensure!(dt >= 25_000, "timed out after only {dt} us");
+    ensure!(ev.wait(Some(0)) == WaitStatus::Timeout, "zero-timeout poll did not report timeout");
+    Ok(())
+}
+
+fn sync_notification_event() -> TestResult {
+    let ev = Arc::new(Event::new(true, false));
+    let released = Arc::new(AtomicU64::new(0));
+    let mut threads = Vec::new();
+    for _ in 0..4 {
+        let (e, r) = (ev.clone(), released.clone());
+        threads.push(sched::spawn("test-notify", priority::NORMAL, move || {
+            if e.wait(Some(2000)) == WaitStatus::Signaled {
+                r.fetch_add(1, Ordering::Relaxed);
+            }
+        })?);
+    }
+    sched::sleep_ms(10);
+    ev.set();
+    for t in &threads {
+        join(t, 1000)?;
+    }
+    ensure!(released.load(Ordering::Relaxed) == 4, "only {} of 4 waiters released", released.load(Ordering::Relaxed));
+    ensure!(ev.is_set(), "manual-reset event reset itself");
+    ev.reset();
+    ensure!(!ev.is_set(), "reset() did not clear the event");
+    Ok(())
+}
+
+struct Guarded {
+    lock: Mutex,
+    value: core::cell::UnsafeCell<u64>,
+}
+
+// SAFETY: `value` is only accessed while holding `lock`.
+unsafe impl Sync for Guarded {}
+unsafe impl Send for Guarded {}
+
+fn sync_mutex() -> TestResult {
+    let shared = Arc::new(Guarded { lock: Mutex::new(), value: core::cell::UnsafeCell::new(0) });
+    let mut threads = Vec::new();
+    for _ in 0..4 {
+        let s = shared.clone();
+        threads.push(sched::spawn("test-mutex", priority::NORMAL, move || {
+            for _ in 0..50 {
+                s.lock.acquire(None);
+                // Read, yield, write: loses updates unless the mutex excludes.
+                // SAFETY: protected by the mutex.
+                let v = unsafe { *s.value.get() };
+                sched::yield_now();
+                unsafe { *s.value.get() = v + 1 };
+                s.lock.release();
+            }
+        })?);
+    }
+    for t in &threads {
+        join(t, 5000)?;
+    }
+    // SAFETY: all writers have finished.
+    let total = unsafe { *shared.value.get() };
+    ensure!(total == 200, "mutex lost updates: {total} != 200");
+    ensure!(shared.lock.acquire(Some(0)) == WaitStatus::Signaled, "first acquire failed");
+    ensure!(shared.lock.acquire(Some(0)) == WaitStatus::Signaled, "recursive acquire failed");
+    shared.lock.release();
+    shared.lock.release();
+    Ok(())
+}
+
+fn sync_semaphore() -> TestResult {
+    let sem = Arc::new(Semaphore::new(0, 10));
+    let consumed = Arc::new(AtomicU64::new(0));
+    let mut threads = Vec::new();
+    for _ in 0..3 {
+        let (s, c) = (sem.clone(), consumed.clone());
+        threads.push(sched::spawn("test-sem", priority::NORMAL, move || {
+            for _ in 0..5 {
+                if s.wait(Some(3000)) == WaitStatus::Signaled {
+                    c.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        })?);
+    }
+    for _ in 0..3 {
+        sem.release(5).map_err(|_| "release(5) failed")?;
+        sched::sleep_ms(5);
+    }
+    for t in &threads {
+        join(t, 5000)?;
+    }
+    ensure!(consumed.load(Ordering::Relaxed) == 15, "consumed {} of 15", consumed.load(Ordering::Relaxed));
+    ensure!(sem.release(11).is_err(), "release beyond the limit succeeded");
+    ensure!(sem.release(10) == Ok(0), "release up to the limit failed");
     Ok(())
 }

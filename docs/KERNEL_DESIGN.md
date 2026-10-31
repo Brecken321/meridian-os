@@ -119,15 +119,41 @@ there is no HPET). The bootstrap processor's 1 kHz APIC timer interrupt
 maintains the tick count; `clock::uptime_us()` uses the TSC. Tickless
 (one-shot/deadline) operation is planned to reduce idle power use.
 
-## Planned next: threads and the dispatcher
+## Threads and the dispatcher (`ke/sched.rs`, `ke/thread.rs`)
 
-* Thread objects with their own kernel stacks; context switch saving
-  callee-saved registers and RFLAGS.
-* 32 priority levels (0–15 variable, 16–31 real-time) with a ready-summary
-  bitmap for O(1) selection, per-processor ready queues.
-* Preemption through the `DISPATCH` software interrupt: the clock interrupt
-  requests it, and it fires as soon as the IRQL drops below `DISPATCH_LEVEL`,
-  so code holding a spin lock is never preempted.
-* Dispatcher objects (event, mutex, semaphore, timer) with wait/signal.
-* SMP: INIT-SIPI-SIPI startup through the reserved low page, per-CPU GDT,
-  TSS and PCR, TLB shootdown IPIs.
+* **Threads** have a 32 KiB kernel stack with a guard page, a priority
+  (0 idle, 1–15 variable, 16–31 real-time), a state, a saved stack pointer
+  and a "terminated" notification event used for joining. Each processor's
+  boot context becomes its idle thread.
+* **Context switch** (`arch/x86_64/context.rs`): pushes callee-saved
+  registers and RFLAGS on the outgoing stack, swaps stack pointers, pops on
+  the incoming stack. New threads start in a trampoline that calls
+  `meridian_thread_startup`.
+* **Ready queues**: one FIFO per priority plus a 32-bit summary bitmap
+  (O(1) selection). One dispatcher lock protects all scheduling and
+  dispatcher-object state; it is only taken at DISPATCH_LEVEL and never in
+  interrupt handlers. A switch happens with the lock held and the incoming
+  thread releases it (`finish_switch`), which also drops the outgoing
+  thread's reference so a terminated thread's stack is freed only once
+  nothing runs on it.
+* **Preemption**: the clock interrupt counts down a 10-tick quantum and
+  checks timeout deadlines; readying a higher-priority thread sets
+  `need_resched`. Both raise the DISPATCH software interrupt (vector `0x2F`,
+  a self-IPI), which the APIC holds pending until the IRQL drops below
+  DISPATCH_LEVEL, so preemption never happens while a spin lock is held.
+  The dispatch interrupt gets its EOI before its handler runs because the
+  handler may switch threads.
+* **DPCs** (`ke/dpc.rs`): interrupt handlers queue a DPC on the current
+  processor; DPCs run first thing in the dispatch interrupt.
+* **Waits** (`ke/objects.rs`): events (auto- and manual-reset), counting
+  semaphores and recursive mutexes, with optional timeouts. Timeouts live in
+  a deadline-ordered map processed in the dispatch interrupt.
+
+Planned: wait-for-multiple-objects, APCs, priority boosts and decay, timer
+objects, per-processor ready queues and load balancing.
+
+## Planned next: multiprocessor support
+
+INIT-SIPI-SIPI startup through the reserved low page, per-CPU GDT, TSS, PCR
+and idle thread, TLB shootdown IPIs for kernel unmaps, and IPIs to wake idle
+processors when threads become ready.

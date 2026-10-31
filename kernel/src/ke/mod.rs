@@ -1,6 +1,10 @@
-//! Kernel core ("Ke"): IRQL, time keeping and per-processor state.
-//! The scheduler and dispatcher objects will live here as well.
+//! Kernel core ("Ke"): IRQL, per-processor state, time keeping, DPCs, the
+//! thread dispatcher and dispatcher objects.
 
 pub mod clock;
+pub mod dpc;
 pub mod irql;
+pub mod objects;
 pub mod pcr;
+pub mod sched;
+pub mod thread;

@@ -1,6 +1,7 @@
 //! x86-64 architecture support.
 
 pub mod apic;
+pub mod context;
 pub mod cpu;
 pub mod gdt;
 pub mod idt;
@@ -33,9 +34,11 @@ pub mod vectors {
     /// Local APIC spurious interrupt.
     pub const SPURIOUS: u8 = 0xFF;
 
-    /// Whether an end-of-interrupt must be signalled to the local APIC.
-    /// Spurious interrupts and (masked) legacy PIC vectors must not get one.
+    /// Whether an end-of-interrupt must be signalled to the local APIC after
+    /// the handler runs. Spurious interrupts and (masked) legacy PIC vectors
+    /// must not get one; DISPATCH gets its EOI *before* the handler because
+    /// the handler may switch to another thread.
     pub fn needs_eoi(vector: u8) -> bool {
-        !(PIC_BASE..APIC_ERROR).contains(&vector) && vector != SPURIOUS
+        !(PIC_BASE..APIC_ERROR).contains(&vector) && vector != SPURIOUS && vector != DISPATCH
     }
 }

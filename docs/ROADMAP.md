@@ -23,8 +23,9 @@ Update this file whenever a milestone moves.
 * ✅ Exceptions with recoverable fault probes
 * ✅ ACPI static tables, local APIC (xAPIC/x2APIC), I/O APIC, IRQL via CR8
 * ✅ HPET/PIT calibration, TSC clock, 1 kHz clock interrupt
-* ⬜ Threads, context switching, priority scheduler, DISPATCH-level preemption
-* ⬜ Dispatcher objects: events, mutexes, semaphores, timers, waits
+* ✅ Threads, context switching, priority scheduler, DISPATCH-level preemption, DPCs
+* ✅ Dispatcher objects: events (auto/manual reset), mutexes, semaphores, timed waits, sleep
+* ⬜ Wait for multiple objects, APCs, priority boosts, timer objects
 * ⬜ SMP: AP startup, per-CPU state, TLB shootdown, multicore scheduling
 * ⬜ Object manager and handle tables
 * ⬜ System calls (SYSCALL/SYSRET), user-mode address spaces
@@ -92,6 +93,8 @@ Update this file whenever a milestone moves.
 
 ## Next session starts here
 
-1. Threads + scheduler + dispatcher objects (Phase 3), with self tests.
-2. SMP bring-up using the reserved trampoline page.
+1. SMP bring-up using the reserved trampoline page: per-CPU GDT/TSS/PCR and
+   idle threads, TLB shootdown for kernel unmaps, multicore scheduling
+   (kick idle processors from `make_ready`).
+2. Object manager and handle tables.
 3. System calls and the first ring-3 code.

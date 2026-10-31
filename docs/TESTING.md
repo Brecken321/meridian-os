@@ -18,7 +18,7 @@ command line, and the kernel:
 A kernel crash during the tests exits QEMU with the failure code, and a hang
 is caught by the harness timeout, so CI never waits forever.
 
-Current tests (19):
+Current tests (31):
 
 | Test | Checks |
 |------|--------|
@@ -41,6 +41,18 @@ Current tests (19):
 | `acpi.tables` | MADT lists processors and an I/O APIC; FADT present |
 | `pci.enumeration` | PCI scan finds devices including a host bridge |
 | `ps2.decode` | Scancode decoding incl. shift and extended keys |
+| `dpc.deferred_until_irql_drops` | A DPC queued at HIGH_LEVEL runs exactly once, only after IRQL drops |
+| `sched.spawn_join` | Thread creation, execution and join |
+| `sched.many_threads` | 16 threads with yields complete correctly |
+| `sched.time_slicing` | Two never-yielding threads both make progress (preemptive round robin) |
+| `sched.priority_preemption` | A higher-priority thread preempts the creator immediately |
+| `sched.sleep` | Sleep duration is at least the request and not wildly longer |
+| `sched.stack_reclaimed` | Creating and destroying 20 threads leaks no memory |
+| `sync.event` | Auto-reset event blocks a waiter, releases it once, resets |
+| `sync.event_timeout` | Timed waits time out after at least the timeout; zero timeout polls |
+| `sync.notification_event` | Manual-reset event releases all waiters and stays set until reset |
+| `sync.mutex` | Mutual exclusion across yields (no lost updates), recursion |
+| `sync.semaphore` | Producer/consumer counting and the limit |
 
 ### Adding a test
 

@@ -27,7 +27,9 @@ tested on every commit in QEMU with UEFI firmware:
 | HPET/PIT-calibrated TSC and APIC timers, 1 kHz clock | ✅ working |
 | PCI enumeration, PS/2 keyboard, serial console, framebuffer console | ✅ working |
 | Kernel debug shell, ACPI reboot/power-off | ✅ working (QEMU) |
-| Threads, scheduler, multiprocessor startup | 🚧 next |
+| Kernel threads, 32-level preemptive scheduler, DPCs | ✅ working |
+| Events, semaphores, mutexes, timed waits, sleep | ✅ working |
+| Multiprocessor startup | 🚧 next |
 | User mode, system calls, PE loader, Win32 subsystem, desktop, drivers… | 📋 planned |
 
 Nothing runs Windows applications yet, there is no desktop yet, and no real

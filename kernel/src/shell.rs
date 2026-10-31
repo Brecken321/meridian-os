@@ -8,7 +8,7 @@ use alloc::string::String;
 use crate::arch::x86_64::{apic, cpu, idt};
 use crate::drivers::{fbcon, ps2};
 use crate::hal::{acpi, pci, power, serial};
-use crate::ke::{clock, irql, pcr};
+use crate::ke::{self, clock, irql, pcr};
 use crate::mm::{heap, pmm};
 
 const PROMPT: &str = "\x1b[96mmeridian\x1b[0m> ";
@@ -27,6 +27,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "acpi", help: "ACPI tables, processors and interrupt controllers", run: cmd_acpi },
     Command { name: "pci", help: "PCI devices", run: cmd_pci },
     Command { name: "irq", help: "interrupt statistics", run: cmd_irq },
+    Command { name: "threads", help: "kernel threads and scheduler statistics", run: cmd_threads },
     Command { name: "uptime", help: "time since boot", run: cmd_uptime },
     Command { name: "log", help: "replay the kernel log", run: cmd_log },
     Command { name: "clear", help: "clear the screen", run: cmd_clear },
@@ -69,8 +70,8 @@ pub fn run() -> ! {
             }
         }
         if idle {
-            // Sleep until the next interrupt (keyboard or the 1 ms clock).
-            cpu::enable_and_halt();
+            // Block until the keyboard or serial driver reports input.
+            crate::drivers::input::AVAILABLE.wait(None);
         }
     }
 }
@@ -251,6 +252,24 @@ fn cmd_irq(_: &str) {
     }
     kprintln!("  unexpected interrupts: {}", idt::unexpected_count());
     kprintln!("  current IRQL: {}", irql::name(irql::current()));
+}
+
+fn cmd_threads(_: &str) {
+    kprintln!("  {:>4}  {:<24} {:>4}  {:<10} {:>4}  {:>10}", "id", "name", "prio", "state", "cpu", "cpu time");
+    for t in ke::sched::threads() {
+        let ticks = t.cpu_ticks.load(core::sync::atomic::Ordering::Relaxed);
+        kprintln!(
+            "  {:>4}  {:<24} {:>4}  {:<10} {:>4}  {:>7}.{:03}s",
+            t.id,
+            t.name(),
+            t.priority(),
+            t.state().name(),
+            t.last_cpu(),
+            ticks / 1000,
+            ticks % 1000
+        );
+    }
+    kprintln!("  context switches: {}", ke::sched::context_switches());
 }
 
 fn cmd_uptime(_: &str) {

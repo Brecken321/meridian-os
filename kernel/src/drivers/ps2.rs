@@ -163,6 +163,8 @@ fn interrupt(_frame: &mut TrapFrame) {
             }
         }
     }
+    drop(state);
+    super::input::notify();
 }
 
 fn decode(s: &mut State, byte: u8) {

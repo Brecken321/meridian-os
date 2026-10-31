@@ -4,6 +4,10 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::x86_64::cpu::{inb, outb};
+use crate::arch::x86_64::idt::{self, TrapFrame};
+use crate::arch::x86_64::{apic, ioapic, vectors};
+use crate::ke::irql::HIGH_LEVEL;
+use crate::sync::SpinLock;
 
 const COM1: u16 = 0x3F8;
 const DATA: u16 = 0;
@@ -14,6 +18,17 @@ const MODEM_CTRL: u16 = 4;
 const LINE_STATUS: u16 = 5;
 
 static PRESENT: AtomicBool = AtomicBool::new(false);
+static RX_INTERRUPT: AtomicBool = AtomicBool::new(false);
+
+const RX_LEN: usize = 256;
+
+struct RxRing {
+    buf: [u8; RX_LEN],
+    head: usize,
+    len: usize,
+}
+
+static RX: SpinLock<RxRing> = SpinLock::new(RxRing { buf: [0; RX_LEN], head: 0, len: 0 });
 
 /// Initialises COM1 at 115200 8N1. Returns false if no UART responds.
 pub fn init() -> bool {
@@ -70,6 +85,46 @@ pub fn read_byte() -> Option<u8> {
     if !present() {
         return None;
     }
+    if RX_INTERRUPT.load(Ordering::Acquire) {
+        let mut rx = RX.lock_at(HIGH_LEVEL);
+        if rx.len == 0 {
+            return None;
+        }
+        let b = rx.buf[rx.head];
+        rx.head = (rx.head + 1) % RX_LEN;
+        rx.len -= 1;
+        return Some(b);
+    }
     // SAFETY: COM1 was detected in `init`.
     unsafe { (inb(COM1 + LINE_STATUS) & 1 != 0).then(|| inb(COM1 + DATA)) }
+}
+
+/// Switches COM1 input from polling to its interrupt (ISA IRQ 4).
+pub fn enable_receive_interrupt() -> bool {
+    if !present() || !idt::register(vectors::SERIAL, receive_interrupt) {
+        return false;
+    }
+    if !ioapic::route_isa_irq(4, vectors::SERIAL, apic::id()) {
+        idt::unregister(vectors::SERIAL);
+        return false;
+    }
+    RX_INTERRUPT.store(true, Ordering::Release);
+    // SAFETY: COM1 exists; enable the "received data available" interrupt.
+    unsafe { outb(COM1 + INT_ENABLE, 0x01) };
+    true
+}
+
+fn receive_interrupt(_: &mut TrapFrame) {
+    let mut rx = RX.lock_at(HIGH_LEVEL);
+    // SAFETY: draining COM1's receive buffer in its interrupt handler.
+    while unsafe { inb(COM1 + LINE_STATUS) } & 1 != 0 {
+        let b = unsafe { inb(COM1 + DATA) };
+        if rx.len < RX_LEN {
+            let tail = (rx.head + rx.len) % RX_LEN;
+            rx.buf[tail] = b;
+            rx.len += 1;
+        }
+    }
+    drop(rx);
+    crate::drivers::input::notify();
 }

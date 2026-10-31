@@ -22,20 +22,34 @@ the self tests or was verified manually in QEMU as noted.
 * PCI enumeration (legacy configuration mechanism).
 * PS/2 keyboard (US layout), COM1 serial console, framebuffer console with
   ANSI colours.
-* Kernel shell: help, ver, cpu, mem, acpi, pci, irq, uptime, log, clear,
-  selftest, reboot, shutdown, crash.
+* Kernel threads with guard-paged stacks; 32-level priority scheduler with
+  O(1) selection, 10 ms time slices, immediate preemption by higher-priority
+  threads through the DISPATCH software interrupt; idle thread; thread exit
+  and stack reclamation.
+* DPCs (interrupt handlers defer work to DISPATCH_LEVEL).
+* Dispatcher objects: auto- and manual-reset events, counting semaphores,
+  recursive mutexes; waits with timeouts; sleep.
+* Interrupt-driven console input: PS/2 keyboard and COM1 receive interrupts
+  wake the shell thread through a DPC and an event.
+* Kernel shell: help, ver, cpu, mem, acpi, pci, irq, threads, uptime, log,
+  clear, selftest, reboot, shutdown, crash.
 * Build: reproducible GPT/FAT32 image writer, QEMU runner, self-test harness,
   screenshot capture, GitHub Actions CI.
 
 ## Not implemented yet
 
-Threads, scheduler, SMP, system calls, user mode, processes, object manager,
+SMP, system calls, user mode, processes, object manager,
 any storage driver, any filesystem, USB, networking, audio, GPU acceleration,
 desktop, Windows compatibility, installer. See [ROADMAP.md](ROADMAP.md).
 
 ## Known limitations
 
-* Only one processor is used; application processors stay parked.
+* Only one processor is used; application processors stay parked. The
+  scheduler already uses per-processor state but has one global ready queue
+  and dispatcher lock.
+* Kernel unmaps do not yet shoot down other processors' TLBs (required
+  before SMP is enabled).
+* No wait-for-multiple-objects, APCs or priority boosting yet.
 * The direct map uses 2 MiB pages across all physical memory below the top of
   RAM, including MMIO holes below 4 GiB; caching for those holes relies on the
   firmware's MTRR setup. Device registers the kernel uses are mapped
@@ -60,7 +74,7 @@ None open. Fixed during bring-up (2026-10-31):
 
 ## Failed tests
 
-None. Latest local run: 19/19 passed (debug and release).
+None. Latest local run: 31/31 passed (debug and release); CI green.
 
 ## Real hardware tested
 

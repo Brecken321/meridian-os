@@ -3,11 +3,13 @@
 
 use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
+use super::dpc::DpcQueue;
+use super::thread::Thread;
 use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::gdt::{Gdt, Tss};
-use crate::sync::RacyCell;
+use crate::sync::{RacyCell, SpinLock};
 
 pub const MAX_CPUS: usize = 64;
 
@@ -26,6 +28,16 @@ pub struct Pcr {
     pub interrupts: AtomicU64,
     pub gdt: UnsafeCell<Gdt>,
     pub tss: UnsafeCell<Tss>,
+    /// Thread running on this processor (owns one strong reference).
+    pub current_thread: AtomicPtr<Thread>,
+    /// This processor's idle thread (owns one strong reference).
+    pub idle_thread: AtomicPtr<Thread>,
+    /// Hand-off slot for the thread being switched away from.
+    pub previous_thread: AtomicPtr<Thread>,
+    /// Set when the running thread should be preempted at the next
+    /// dispatch interrupt (quantum end or a higher-priority thread is ready).
+    pub need_resched: AtomicBool,
+    pub dpcs: SpinLock<DpcQueue>,
 }
 
 // SAFETY: fields are either atomics, immutable after setup, or only touched
@@ -44,6 +56,11 @@ impl Pcr {
             interrupts: AtomicU64::new(0),
             gdt: UnsafeCell::new(Gdt::new()),
             tss: UnsafeCell::new(Tss::new()),
+            current_thread: AtomicPtr::new(ptr::null_mut()),
+            idle_thread: AtomicPtr::new(ptr::null_mut()),
+            previous_thread: AtomicPtr::new(ptr::null_mut()),
+            need_resched: AtomicBool::new(false),
+            dpcs: SpinLock::new(DpcQueue::new()),
         }
     }
 }
