@@ -7,6 +7,7 @@ pub mod gdt;
 pub mod idt;
 pub mod ioapic;
 pub mod pic;
+pub mod smp;
 
 /// Interrupt vector assignments. The upper nibble of a vector is the IRQL
 /// its handler runs at (see `ke::irql`).

@@ -68,14 +68,14 @@ pub unsafe fn initial_frame(stack_top: u64, arg: u64) -> u64 {
     // address is consumed by its `ret`, leaving RSP 16-byte aligned so the
     // `call` in the trampoline gives the callee the ABI-mandated alignment.
     let frame: [u64; 8] = [
-        0,                                          // r15
-        0,                                          // r14
-        0,                                          // r13
-        arg,                                        // r12 -> rdi
-        0,                                          // rbx
-        0,                                          // rbp (ends stack traces)
-        0x2,                                        // rflags: IF clear
-        meridian_thread_trampoline as usize as u64, // return address
+        0,                                              // r15
+        0,                                              // r14
+        0,                                              // r13
+        arg,                                            // r12 -> rdi
+        0,                                              // rbx
+        0,                                              // rbp (ends stack traces)
+        0x2,                                            // rflags: IF clear
+        meridian_thread_trampoline as *const () as u64, // return address
     ];
     let rsp = top - (frame.len() * 8) as u64;
     // SAFETY: the caller guarantees the stack is mapped and unused.

@@ -18,13 +18,14 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use super::clock;
 use super::dpc;
+use super::ipi;
 use super::irql::{self, DISPATCH_LEVEL, Irql};
 use super::objects::WaitObject;
-use super::pcr::{self, Pcr};
+use super::pcr::{self, MAX_CPUS, Pcr};
 use super::thread::{Thread, ThreadState, WAIT_PENDING, WAIT_SIGNALED, WAIT_TIMEOUT, priority};
 use crate::arch::x86_64::idt::{self, TrapFrame};
 use crate::arch::x86_64::{context, cpu, vectors};
@@ -60,6 +61,8 @@ static STATE: RacyCell<State> = RacyCell::new(State {
     next_id: 1,
 });
 static NEXT_DEADLINE: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Lock-free copy of `State::summary` so idle processors can notice work.
+static READY_SUMMARY: AtomicU32 = AtomicU32::new(0);
 static STARTED: AtomicBool = AtomicBool::new(false);
 static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
 
@@ -125,6 +128,7 @@ pub fn init_processor(pcr: &Pcr, name: &str) {
     });
     let idle = Arc::new(Thread::new(id, name, priority::IDLE, None, None));
     idle.set_state(ThreadState::Running);
+    idle.last_cpu.store(pcr.index, Ordering::Relaxed);
     with_lock(|st| st.threads.insert(id, Arc::downgrade(&idle)));
     pcr.idle_thread.store(Arc::into_raw(idle.clone()) as *mut Thread, Ordering::Release);
     pcr.current_thread.store(Arc::into_raw(idle) as *mut Thread, Ordering::Release);
@@ -155,21 +159,49 @@ pub fn spawn(name: &str, prio: u8, entry: impl FnOnce() + Send + 'static) -> Res
     Ok(thread)
 }
 
-/// Puts `t` on its ready queue and preempts this processor if `t` outranks
-/// the thread running here.
+/// Puts `t` on its ready queue and asks the processor best placed to run it
+/// (an idle one, else the one running the lowest-priority thread) to
+/// reschedule, if `t` outranks what that processor is running.
 pub(super) fn make_ready(st: &mut State, t: Arc<Thread>) {
     let p = t.priority() as usize;
     t.set_state(ThreadState::Ready);
     st.ready[p].push_back(t);
-    st.summary |= 1 << p;
-    let pcr = pcr::current();
-    let cur = pcr.current_thread.load(Ordering::Relaxed);
-    // SAFETY: the current thread is alive while it runs.
-    let cur_prio = if is_idle(pcr, cur) { -1 } else { unsafe { (*cur).priority() as i32 } };
-    if p as i32 > cur_prio {
-        pcr.need_resched.store(true, Ordering::Release);
-        dpc::request_dispatch_interrupt();
+    set_summary(st, st.summary | 1 << p);
+
+    let me = pcr::current();
+    let mut target: Option<(&Pcr, i32)> = None;
+    for c in (0..MAX_CPUS).filter_map(pcr::by_index) {
+        let cur = c.current_thread.load(Ordering::Relaxed);
+        if cur.is_null() {
+            continue; // still starting up
+        }
+        // SAFETY: a processor's current thread cannot change while we hold
+        // the dispatcher lock, and the current slot keeps it alive.
+        let prio = if is_idle(c, cur) { -1 } else { unsafe { (*cur).priority() as i32 } };
+        if prio >= p as i32 || (c.index != me.index && c.need_resched.load(Ordering::Relaxed)) {
+            continue;
+        }
+        let better = match target {
+            None => true,
+            Some((_, best)) => prio < best || (prio == best && c.index == me.index),
+        };
+        if better {
+            target = Some((c, prio));
+        }
     }
+    if let Some((c, _)) = target {
+        c.need_resched.store(true, Ordering::Release);
+        if c.index == me.index {
+            dpc::request_dispatch_interrupt();
+        } else {
+            ipi::send(c, ipi::REQUEST_RESCHEDULE);
+        }
+    }
+}
+
+fn set_summary(st: &mut State, summary: u32) {
+    st.summary = summary;
+    READY_SUMMARY.store(summary, Ordering::Relaxed);
 }
 
 fn highest_ready(st: &State) -> Option<usize> {
@@ -180,7 +212,7 @@ fn pop_highest(st: &mut State) -> Option<Arc<Thread>> {
     let p = highest_ready(st)?;
     let t = st.ready[p].pop_front();
     if st.ready[p].is_empty() {
-        st.summary &= !(1 << p);
+        set_summary(st, st.summary & !(1 << p));
     }
     t
 }
@@ -198,7 +230,7 @@ unsafe fn requeue_current(st: &mut State) {
     let p = t.priority() as usize;
     t.set_state(ThreadState::Ready);
     st.ready[p].push_back(t);
-    st.summary |= 1 << p;
+    set_summary(st, st.summary | 1 << p);
 }
 
 /// Switches to the best ready thread (or this processor's idle thread).
@@ -417,7 +449,13 @@ pub fn clock_tick(pcr: &Pcr) {
     }
     let cur = pcr.current_thread.load(Ordering::Relaxed);
     let mut request = false;
-    if !cur.is_null() && !is_idle(pcr, cur) {
+    if cur.is_null() {
+        return;
+    }
+    if is_idle(pcr, cur) {
+        // Pick up work that was queued without kicking this processor.
+        request = READY_SUMMARY.load(Ordering::Relaxed) != 0;
+    } else {
         // SAFETY: the current thread is alive while it runs.
         let t = unsafe { &*cur };
         t.cpu_ticks.fetch_add(1, Ordering::Relaxed);

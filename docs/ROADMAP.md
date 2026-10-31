@@ -26,7 +26,8 @@ Update this file whenever a milestone moves.
 * ✅ Threads, context switching, priority scheduler, DISPATCH-level preemption, DPCs
 * ✅ Dispatcher objects: events (auto/manual reset), mutexes, semaphores, timed waits, sleep
 * ⬜ Wait for multiple objects, APCs, priority boosts, timer objects
-* ⬜ SMP: AP startup, per-CPU state, TLB shootdown, multicore scheduling
+* ✅ SMP: AP startup, per-CPU state, IPIs, cross-processor calls, TLB shootdown, multicore scheduling
+* ⬜ Per-processor ready queues, load balancing, thread affinity
 * ⬜ Object manager and handle tables
 * ⬜ System calls (SYSCALL/SYSRET), user-mode address spaces
 * ⬜ PFN database, demand paging, sections (shared/mapped memory)
@@ -93,8 +94,10 @@ Update this file whenever a milestone moves.
 
 ## Next session starts here
 
-1. SMP bring-up using the reserved trampoline page: per-CPU GDT/TSS/PCR and
-   idle threads, TLB shootdown for kernel unmaps, multicore scheduling
-   (kick idle processors from `make_ready`).
-2. Object manager and handle tables.
-3. System calls and the first ring-3 code.
+1. Object manager: typed, reference-counted kernel objects, a namespace
+   (`\Device`, `\ObjectTypes`, ...) and per-process handle tables with
+   granted-access masks.
+2. Process objects and user address spaces (PML4 per process sharing the
+   kernel half), SYSCALL/SYSRET entry with a service table, safe user-memory
+   copy routines built on the fixup table, and the first ring-3 program.
+3. PE32+ loader for that first program (native subsystem).

@@ -159,8 +159,46 @@ pub fn map_kernel(va: u64, pa: u64, flags: u64) -> Result<(), MapError> {
     unsafe { map(kernel_pml4(), va, pa, flags | GLOBAL) }
 }
 
+/// Unmaps a kernel-half page and invalidates it on every processor before
+/// returning, so the caller may immediately reuse the frame and address.
 pub fn unmap_kernel(va: u64) -> Option<u64> {
-    let _guard = KERNEL_LOCK.lock();
-    // SAFETY: the caller owns `va` (kernel allocators only).
-    unsafe { unmap(kernel_pml4(), va) }
+    let pa = {
+        let _guard = KERNEL_LOCK.lock();
+        // SAFETY: the caller owns `va` (kernel allocators only).
+        unsafe { unmap(kernel_pml4(), va) }
+    };
+    if pa.is_some() {
+        crate::ke::ipi::shootdown(va);
+    }
+    pa
+}
+
+/// Frees every page-table frame (not the mapped frames themselves) below
+/// PML4 slot 256 and clears those slots.
+///
+/// # Safety
+/// No processor may be using the lower half of this address space.
+pub unsafe fn free_lower_half_tables(pml4: u64) {
+    let top = table(pml4);
+    for slot in 0..256 {
+        let e = top[slot];
+        if e & PRESENT == 0 {
+            continue;
+        }
+        let pdpt = e & ADDR_MASK;
+        for &pdpte in table(pdpt).iter() {
+            if pdpte & PRESENT == 0 || pdpte & HUGE != 0 {
+                continue;
+            }
+            let pd = pdpte & ADDR_MASK;
+            for &pde in table(pd).iter() {
+                if pde & PRESENT != 0 && pde & HUGE == 0 {
+                    pmm::free_frame(pde & ADDR_MASK);
+                }
+            }
+            pmm::free_frame(pd);
+        }
+        pmm::free_frame(pdpt);
+        top[slot] = 0;
+    }
 }

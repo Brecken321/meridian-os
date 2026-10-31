@@ -3,6 +3,7 @@
 
 pub mod clock;
 pub mod dpc;
+pub mod ipi;
 pub mod irql;
 pub mod objects;
 pub mod pcr;

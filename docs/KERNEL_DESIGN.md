@@ -152,8 +152,23 @@ maintains the tick count; `clock::uptime_us()` uses the TSC. Tickless
 Planned: wait-for-multiple-objects, APCs, priority boosts and decay, timer
 objects, per-processor ready queues and load balancing.
 
-## Planned next: multiprocessor support
+## Multiprocessor support (`arch/x86_64/smp.rs`, `ke/ipi.rs`)
 
-INIT-SIPI-SIPI startup through the reserved low page, per-CPU GDT, TSS, PCR
-and idle thread, TLB shootdown IPIs for kernel unmaps, and IPIs to wake idle
-processors when threads become ready.
+* **Startup**: the boot manager reserves a page below 1 MiB. The kernel
+  copies a trampoline there (16-bit → 32-bit → 64-bit) and patches in the
+  absolute addresses it needs. A temporary PML4 below 4 GiB maps the
+  trampoline page 1:1 plus the shared kernel half. Each processor is started
+  with INIT and up to two STARTUP IPIs, one at a time, and jumps to
+  `ap_entry` on a stack the bootstrap processor allocated, where it loads
+  the kernel page tables, its own GDT/TSS (with IST stacks) and PCR, enables
+  its local APIC and timer and becomes an idle thread.
+* **IPIs**: one vector (`0xE1`); requests are bits in the target's PCR
+  (`REQUEST_RESCHEDULE`, `REQUEST_CALL`, `REQUEST_TLB_FLUSH`).
+* **TLB shootdown**: `paging::unmap_kernel` invalidates the page on every
+  processor before returning, so frames and addresses can be reused
+  immediately. Shootdowns must never be issued with the dispatcher lock held.
+* **Scheduling**: `make_ready` picks an idle processor, or the one running
+  the lowest-priority thread, and IPIs it if the new thread outranks it.
+  Idle processors also check a lock-free copy of the ready summary on every
+  clock tick.
+* Panics NMI all other processors so the stop screen is never overwritten.

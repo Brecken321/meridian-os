@@ -7,7 +7,7 @@ real kernel**, and test results are never reported unless they actually ran.
 
 `kernel/src/selftest.rs` contains tests that run inside the booted kernel.
 `python tools/mbuild.py test` builds the system, boots it in QEMU (q35
-machine, UEFI firmware, 4 vCPUs, 512 MiB) with `selftest` on the kernel
+machine, UEFI firmware, 4 vCPUs by default, `--smp N` to change, 512 MiB) with `selftest` on the kernel
 command line, and the kernel:
 
 1. finishes normal initialisation,
@@ -18,7 +18,7 @@ command line, and the kernel:
 A kernel crash during the tests exits QEMU with the failure code, and a hang
 is caught by the harness timeout, so CI never waits forever.
 
-Current tests (31):
+Current tests (35):
 
 | Test | Checks |
 |------|--------|
@@ -53,6 +53,10 @@ Current tests (31):
 | `sync.notification_event` | Manual-reset event releases all waiters and stays set until reset |
 | `sync.mutex` | Mutual exclusion across yields (no lost updates), recursion |
 | `sync.semaphore` | Producer/consumer counting and the limit |
+| `smp.processors_online` | Every enabled MADT processor is online with an idle thread and a ticking clock |
+| `smp.cross_call` | A function sent by IPI runs on each processor |
+| `smp.tlb_shootdown` | After remapping a page, another processor never sees the stale translation |
+| `smp.parallel_threads` | High-priority CPU-bound threads spread across processors |
 
 ### Adding a test
 

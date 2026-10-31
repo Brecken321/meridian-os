@@ -38,6 +38,8 @@ pub struct Pcr {
     /// dispatch interrupt (quantum end or a higher-priority thread is ready).
     pub need_resched: AtomicBool,
     pub dpcs: SpinLock<DpcQueue>,
+    /// Pending inter-processor requests (`ke::ipi::REQUEST_*` bits).
+    pub ipi_requests: AtomicU32,
 }
 
 // SAFETY: fields are either atomics, immutable after setup, or only touched
@@ -61,6 +63,7 @@ impl Pcr {
             previous_thread: AtomicPtr::new(ptr::null_mut()),
             need_resched: AtomicBool::new(false),
             dpcs: SpinLock::new(DpcQueue::new()),
+            ipi_requests: AtomicU32::new(0),
         }
     }
 }

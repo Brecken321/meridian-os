@@ -29,6 +29,11 @@ the self tests or was verified manually in QEMU as noted.
 * DPCs (interrupt handlers defer work to DISPATCH_LEVEL).
 * Dispatcher objects: auto- and manual-reset events, counting semaphores,
   recursive mutexes; waits with timeouts; sleep.
+* Symmetric multiprocessing: every enabled processor in the MADT is started
+  through a real-mode trampoline (tested with 1, 2 and 4 vCPUs); per-processor
+  GDT/TSS/IST stacks, PCR, idle thread and clock; IPIs for rescheduling,
+  cross-processor function calls and TLB shootdown; the scheduler places
+  newly ready threads on idle or lower-priority processors.
 * Interrupt-driven console input: PS/2 keyboard and COM1 receive interrupts
   wake the shell thread through a DPC and an event.
 * Kernel shell: help, ver, cpu, mem, acpi, pci, irq, threads, uptime, log,
@@ -38,18 +43,18 @@ the self tests or was verified manually in QEMU as noted.
 
 ## Not implemented yet
 
-SMP, system calls, user mode, processes, object manager,
+System calls, user mode, processes, object manager,
 any storage driver, any filesystem, USB, networking, audio, GPU acceleration,
 desktop, Windows compatibility, installer. See [ROADMAP.md](ROADMAP.md).
 
 ## Known limitations
 
-* Only one processor is used; application processors stay parked. The
-  scheduler already uses per-processor state but has one global ready queue
-  and dispatcher lock.
-* Kernel unmaps do not yet shoot down other processors' TLBs (required
-  before SMP is enabled).
-* No wait-for-multiple-objects, APCs or priority boosting yet.
+* The scheduler has one global ready queue and dispatcher lock; that is
+  simple and correct but will contend on many-core machines. Per-processor
+  queues are planned.
+* No thread affinity, wait-for-multiple-objects, APCs or priority boosting yet.
+* Every TLB shootdown interrupts all other processors (no tracking of which
+  processors might cache the address).
 * The direct map uses 2 MiB pages across all physical memory below the top of
   RAM, including MMIO holes below 4 GiB; caching for those holes relies on the
   firmware's MTRR setup. Device registers the kernel uses are mapped
@@ -74,7 +79,8 @@ None open. Fixed during bring-up (2026-10-31):
 
 ## Failed tests
 
-None. Latest local run: 31/31 passed (debug and release); CI green.
+None. Latest local runs: 35/35 passed (debug and release; 1, 2 and 4 vCPUs;
+five consecutive 4-vCPU runs).
 
 ## Real hardware tested
 

@@ -71,6 +71,10 @@ const TESTS: &[Test] = &[
     Test { name: "sync.notification_event", run: sync_notification_event },
     Test { name: "sync.mutex", run: sync_mutex },
     Test { name: "sync.semaphore", run: sync_semaphore },
+    Test { name: "smp.processors_online", run: smp_processors_online },
+    Test { name: "smp.cross_call", run: smp_cross_call },
+    Test { name: "smp.tlb_shootdown", run: smp_tlb_shootdown },
+    Test { name: "smp.parallel_threads", run: smp_parallel_threads },
 ];
 
 /// Runs every test; returns (passed, failed).
@@ -584,5 +588,89 @@ fn sync_semaphore() -> TestResult {
     ensure!(consumed.load(Ordering::Relaxed) == 15, "consumed {} of 15", consumed.load(Ordering::Relaxed));
     ensure!(sem.release(11).is_err(), "release beyond the limit succeeded");
     ensure!(sem.release(10) == Ok(0), "release up to the limit failed");
+    Ok(())
+}
+
+fn online_cpus() -> Vec<u32> {
+    (0..crate::ke::pcr::MAX_CPUS).filter_map(crate::ke::pcr::by_index).map(|p| p.index).collect()
+}
+
+fn smp_processors_online() -> TestResult {
+    let enabled = acpi::get().and_then(|a| a.madt.as_ref()).map_or(1, |m| m.cpus.iter().filter(|c| c.enabled).count());
+    let online = crate::ke::pcr::online_count() as usize;
+    ensure!(online == enabled, "{online} of {enabled} processors online");
+    for p in (0..crate::ke::pcr::MAX_CPUS).filter_map(crate::ke::pcr::by_index) {
+        ensure!(!p.idle_thread.load(Ordering::Relaxed).is_null(), "cpu{} has no idle thread", p.index);
+        ensure!(p.ticks.load(Ordering::Relaxed) > 0, "cpu{} clock is not ticking", p.index);
+    }
+    Ok(())
+}
+
+fn smp_cross_call() -> TestResult {
+    for cpu in online_cpus() {
+        let got = crate::ke::ipi::call_on(cpu, |x| x + crate::ke::pcr::current().index as u64, 1000)
+            .ok_or("processor vanished")?;
+        ensure!(got == 1000 + cpu as u64, "call on cpu{cpu} ran on cpu{}", got.wrapping_sub(1000));
+    }
+    Ok(())
+}
+
+fn smp_tlb_shootdown() -> TestResult {
+    let me = crate::ke::pcr::current().index;
+    let Some(other) = online_cpus().into_iter().find(|&c| c != me) else { return Ok(()) };
+    let va = kva::reserve(1).ok_or("no kernel address space")?;
+    let a = pmm::alloc_zeroed_frame().ok_or("out of frames")?;
+    let b = pmm::alloc_zeroed_frame().ok_or("out of frames")?;
+    // SAFETY: freshly allocated frames, written through the direct map.
+    unsafe {
+        (phys_to_virt(a) as *mut u64).write_volatile(0xAAAA_AAAA);
+        (phys_to_virt(b) as *mut u64).write_volatile(0xBBBB_BBBB);
+    }
+    fn read(va: u64) -> u64 {
+        // SAFETY: the test keeps `va` mapped while the call runs.
+        unsafe { (va as *const u64).read_volatile() }
+    }
+    let flags = paging::WRITABLE | paging::NO_EXECUTE;
+    paging::map_kernel(va, a, flags).map_err(|e| format!("{e:?}"))?;
+    // The other processor now caches va -> a in its TLB.
+    let first = crate::ke::ipi::call_on(other, read, va).ok_or("cross call failed")?;
+    ensure!(first == 0xAAAA_AAAA, "first read saw {first:#x}");
+    // Remapping must not leave a stale translation on the other processor.
+    paging::unmap_kernel(va);
+    paging::map_kernel(va, b, flags).map_err(|e| format!("{e:?}"))?;
+    let second = crate::ke::ipi::call_on(other, read, va).ok_or("cross call failed")?;
+    paging::unmap_kernel(va);
+    pmm::free_frame(a);
+    pmm::free_frame(b);
+    kva::release(va, 1);
+    ensure!(second == 0xBBBB_BBBB, "cpu{other} read a stale mapping ({second:#x})");
+    Ok(())
+}
+
+fn smp_parallel_threads() -> TestResult {
+    let cpus = online_cpus().len();
+    if cpus < 2 {
+        return Ok(());
+    }
+    // Spinning threads at a higher priority than everything else must spread
+    // across processors rather than queue on one. They stop on their own:
+    // as intended, they starve this lower-priority thread while they run.
+    let seen = Arc::new(AtomicU64::new(0));
+    let until = clock::uptime_us() + 50_000;
+    let mut threads = Vec::new();
+    for _ in 0..cpus {
+        let seen = seen.clone();
+        threads.push(sched::spawn("test-parallel", priority::HIGH, move || {
+            while clock::uptime_us() < until {
+                seen.fetch_or(1 << crate::ke::pcr::current().index, Ordering::Relaxed);
+                core::hint::spin_loop();
+            }
+        })?);
+    }
+    for t in &threads {
+        join(t, 2000)?;
+    }
+    let used = seen.load(Ordering::Relaxed).count_ones() as usize;
+    ensure!(used >= 2, "threads ran on only {used} of {cpus} processors");
     Ok(())
 }

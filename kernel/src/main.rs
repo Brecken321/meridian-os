@@ -184,9 +184,14 @@ pub extern "C" fn kernel_entry(info: *const BootInfo) -> ! {
         info!("serial: COM1 receive interrupt enabled");
     }
 
-    // --- Threads -----------------------------------------------------------
+    // --- Threads and processors -------------------------------------------
     // From here on this code is the bootstrap processor's idle thread.
     ke::sched::init();
+    ke::ipi::init();
+    if let Some(m) = madt {
+        let started = arch::x86_64::smp::start_application_processors(info.ap_trampoline, m);
+        info!("smp: {} of {} processors online", started + 1, m.cpus.iter().filter(|c| c.enabled).count());
+    }
     info!("boot: kernel initialised in {} ms", clock::uptime_ms());
 
     let selftest = info.has_option("selftest");

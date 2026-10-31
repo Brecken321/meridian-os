@@ -29,8 +29,9 @@ tested on every commit in QEMU with UEFI firmware:
 | Kernel debug shell, ACPI reboot/power-off | ✅ working (QEMU) |
 | Kernel threads, 32-level preemptive scheduler, DPCs | ✅ working |
 | Events, semaphores, mutexes, timed waits, sleep | ✅ working |
-| Multiprocessor startup | 🚧 next |
-| User mode, system calls, PE loader, Win32 subsystem, desktop, drivers… | 📋 planned |
+| Multiprocessor: all cores started, IPIs, TLB shootdown, multicore scheduling | ✅ working |
+| Object manager, system calls, user mode | 🚧 next |
+| PE loader, Win32 subsystem, storage, desktop, drivers… | 📋 planned |
 
 Nothing runs Windows applications yet, there is no desktop yet, and no real
 hardware has been tested yet. See [docs/STATUS.md](docs/STATUS.md) for the

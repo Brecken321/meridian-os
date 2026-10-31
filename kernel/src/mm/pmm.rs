@@ -123,6 +123,34 @@ pub fn alloc_frame() -> Option<u64> {
     None
 }
 
+/// Allocates one frame whose physical address is below `limit` (for
+/// structures 32-bit or real-mode code must reach).
+pub fn alloc_frame_below(limit: u64) -> Option<u64> {
+    let mut guard = BITMAP.lock();
+    let bm = guard.as_mut()?;
+    let first = (LOW_MEMORY_LIMIT / PAGE_SIZE) as usize / 64;
+    let last = ((limit / PAGE_SIZE).min(bm.frames) as usize).div_ceil(64).min(bm.words.len());
+    for w in first..last {
+        if bm.words[w] != u64::MAX {
+            let frame = w as u64 * 64 + bm.words[w].trailing_ones() as u64;
+            if frame >= bm.frames || (frame + 1) * PAGE_SIZE > limit {
+                return None;
+            }
+            bm.set_used(frame);
+            bm.free -= 1;
+            return Some(frame * PAGE_SIZE);
+        }
+    }
+    None
+}
+
+pub fn alloc_zeroed_frame_below(limit: u64) -> Option<u64> {
+    let pa = alloc_frame_below(limit)?;
+    // SAFETY: freshly allocated frame, reachable through the direct map.
+    unsafe { core::ptr::write_bytes(phys_to_virt(pa) as *mut u8, 0, PAGE_SIZE as usize) };
+    Some(pa)
+}
+
 /// Allocates one zero-filled frame.
 pub fn alloc_zeroed_frame() -> Option<u64> {
     let pa = alloc_frame()?;
