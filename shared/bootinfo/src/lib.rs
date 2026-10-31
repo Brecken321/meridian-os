@@ -13,7 +13,7 @@
 /// `"MERIDIAN"` in little-endian ASCII.
 pub const BOOTINFO_MAGIC: u64 = u64::from_le_bytes(*b"MERIDIAN");
 /// Bumped whenever the layout of [`BootInfo`] changes.
-pub const BOOTINFO_VERSION: u32 = 1;
+pub const BOOTINFO_VERSION: u32 = 2;
 
 /// Virtual address at which all physical memory is mapped (PML4 slot 256).
 pub const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
@@ -51,6 +51,8 @@ pub mod memory_kind {
     pub const BOOT_INFO: u32 = 11;
     /// A page below 1 MiB reserved for the application-processor trampoline.
     pub const AP_TRAMPOLINE: u32 = 12;
+    /// A file the boot manager loaded for the kernel (see [`super::BootModule`]).
+    pub const BOOT_MODULE: u32 = 13;
 
     /// Human-readable name for diagnostics.
     pub const fn name(kind: u32) -> &'static str {
@@ -67,6 +69,7 @@ pub mod memory_kind {
             PAGE_TABLES => "pagetables",
             BOOT_INFO => "bootinfo",
             AP_TRAMPOLINE => "ap-tramp",
+            BOOT_MODULE => "module",
             _ => "unknown",
         }
     }
@@ -102,6 +105,32 @@ pub struct FramebufferInfo {
     pub stride: u32,
     pub format: u32,
 }
+
+/// A file loaded by the boot manager before the kernel has storage drivers
+/// (for example the first user-mode program).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct BootModule {
+    /// File name (UTF-8, not NUL terminated), e.g. `init.exe`.
+    pub name: [u8; 32],
+    pub name_len: u32,
+    pub reserved: u32,
+    /// Physical address and size of the file contents.
+    pub base: u64,
+    pub size: u64,
+}
+
+impl BootModule {
+    pub const EMPTY: Self = Self { name: [0; 32], name_len: 0, reserved: 0, base: 0, size: 0 };
+
+    pub fn name(&self) -> &str {
+        let len = (self.name_len as usize).min(self.name.len());
+        core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+}
+
+/// Maximum number of boot modules.
+pub const MODULES_MAX: usize = 8;
 
 /// Maximum kernel command line length in bytes.
 pub const CMDLINE_MAX: usize = 256;
@@ -143,6 +172,8 @@ pub struct BootInfo {
     pub firmware_vendor_len: u32,
     pub firmware_revision: u32,
     pub cmdline: [u8; CMDLINE_MAX],
+    pub modules: [BootModule; MODULES_MAX],
+    pub module_count: u32,
 }
 
 impl BootInfo {
@@ -162,6 +193,11 @@ impl BootInfo {
     /// command line, or as the key of a `key=value` word.
     pub fn has_option(&self, option: &str) -> bool {
         self.cmdline().split_ascii_whitespace().any(|w| w == option || w.split('=').next() == Some(option))
+    }
+
+    /// The boot modules that were loaded.
+    pub fn modules(&self) -> &[BootModule] {
+        &self.modules[..(self.module_count as usize).min(MODULES_MAX)]
     }
 
     /// Value of a `key=value` command line option.

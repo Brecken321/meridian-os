@@ -126,7 +126,7 @@ pub fn init_processor(pcr: &Pcr, name: &str) {
         st.next_id += 1;
         st.next_id - 1
     });
-    let idle = Arc::new(Thread::new(id, name, priority::IDLE, None, None));
+    let idle = Arc::new(Thread::new(id, name, priority::IDLE, None, None, None));
     idle.set_state(ThreadState::Running);
     idle.last_cpu.store(pcr.index, Ordering::Relaxed);
     with_lock(|st| st.threads.insert(id, Arc::downgrade(&idle)));
@@ -143,13 +143,26 @@ pub fn init() {
 
 /// Creates a kernel thread and makes it ready to run.
 pub fn spawn(name: &str, prio: u8, entry: impl FnOnce() + Send + 'static) -> Result<Arc<Thread>, &'static str> {
+    spawn_in(None, name, prio, entry)
+}
+
+/// Creates a thread belonging to `process` (or a kernel thread for `None`).
+/// The entry closure runs in kernel mode with the process's address space
+/// active; user threads use it to drop to ring 3.
+pub fn spawn_in(
+    process: Option<Arc<crate::ps::process::Process>>,
+    name: &str,
+    prio: u8,
+    entry: impl FnOnce() + Send + 'static,
+) -> Result<Arc<Thread>, &'static str> {
     let stack = kva::alloc_stack(STACK_PAGES).ok_or("out of memory for a kernel stack")?;
     let top = stack.top();
     let id = with_lock(|st| {
         st.next_id += 1;
         st.next_id - 1
     });
-    let thread = Arc::new(Thread::new(id, name, prio.clamp(1, priority::MAX), Some(stack), Some(Box::new(entry))));
+    let thread =
+        Arc::new(Thread::new(id, name, prio.clamp(1, priority::MAX), Some(stack), Some(Box::new(entry)), process));
     // SAFETY: the stack is fresh and the thread has not been published yet.
     unsafe { *thread.context.get() = context::initial_frame(top, Arc::as_ptr(&thread) as u64) };
     with_lock(|st| {
@@ -265,8 +278,16 @@ unsafe fn switch_locked(st: &mut State) {
     next.quantum.store(QUANTUM_TICKS, Ordering::Relaxed);
     next.last_cpu.store(pcr.index, Ordering::Relaxed);
     if let Some(top) = next.stack_top() {
+        // Interrupts from user mode and system calls enter on this stack.
         // SAFETY: only this processor touches its TSS.
         unsafe { (*pcr.tss.get()).rsp = [top, 0, 0] };
+        pcr.kernel_rsp.store(top, Ordering::Relaxed);
+    }
+    let root = next.page_table_root();
+    if cpu::read_cr3() & !0xFFF != root {
+        // SAFETY: every address space maps the shared kernel half, so this
+        // code and both stacks stay mapped across the switch.
+        unsafe { cpu::write_cr3(root) };
     }
     // SAFETY: `next` is valid; its saved context came from a switch or
     // `initial_frame`.

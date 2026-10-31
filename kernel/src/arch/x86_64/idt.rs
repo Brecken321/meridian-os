@@ -257,6 +257,11 @@ pub fn exception_name(vector: u64) -> &'static str {
 }
 
 fn handle_exception(frame: &mut TrapFrame) {
+    // Faults raised by user code terminate that process, never the kernel.
+    // (NMI, double fault and machine check are platform events.)
+    if frame.from_user_mode() && !matches!(frame.vector, 2 | 8 | 18) {
+        crate::ps::process::user_exception(frame);
+    }
     match frame.vector {
         3 => {
             BREAKPOINTS.fetch_add(1, Ordering::Relaxed);

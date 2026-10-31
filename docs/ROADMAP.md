@@ -28,8 +28,8 @@ Update this file whenever a milestone moves.
 * ⬜ Wait for multiple objects, APCs, priority boosts, timer objects
 * ✅ SMP: AP startup, per-CPU state, IPIs, cross-processor calls, TLB shootdown, multicore scheduling
 * ⬜ Per-processor ready queues, load balancing, thread affinity
-* ⬜ Object manager and handle tables
-* ⬜ System calls (SYSCALL/SYSRET), user-mode address spaces
+* ✅ Handle tables (per process, NT-style handle values); 🚧 object namespace and access masks
+* ✅ System calls (SYSCALL/SYSRET), user-mode address spaces, safe user-memory copies (SMAP-aware)
 * ⬜ PFN database, demand paging, sections (shared/mapped memory)
 
 ## Phase 4 — Storage and devices ⬜
@@ -43,9 +43,10 @@ Update this file whenever a milestone moves.
 
 ## Phase 5 — User mode ⬜
 
-* ⬜ PE32+ loader (shared by native and Win32 programs)
-* ⬜ Native runtime + first user programs; session manager; service manager
-* ⬜ Process isolation tests; crash of a user process never stops the kernel
+* ✅ PE32+ loader (sections, protections, base relocations); ⬜ imports, TLS, exception tables
+* ✅ Native runtime (`runtime/rt`) + first user program (`system/init`); ⬜ session manager; service manager
+* ✅ Process isolation tests; a crashing user process never stops the kernel
+* ⬜ User-mode thread creation, multi-threaded processes, process creation from user mode
 * ⬜ User-mode driver host prototype
 
 ## Phase 6 — Graphics and desktop ⬜

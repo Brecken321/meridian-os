@@ -30,10 +30,14 @@ tested on every commit in QEMU with UEFI firmware:
 | Kernel threads, 32-level preemptive scheduler, DPCs | ✅ working |
 | Events, semaphores, mutexes, timed waits, sleep | ✅ working |
 | Multiprocessor: all cores started, IPIs, TLB shootdown, multicore scheduling | ✅ working |
-| Object manager, system calls, user mode | 🚧 next |
-| PE loader, Win32 subsystem, storage, desktop, drivers… | 📋 planned |
+| User mode: isolated processes, system calls, handles, PE32+ loader | ✅ working (first native program runs) |
+| Storage drivers and filesystems | 🚧 next |
+| Win32 subsystem, desktop, networking, GPU… | 📋 planned |
 
-Nothing runs Windows applications yet, there is no desktop yet, and no real
+The first user-mode program (`init.exe`, a PE32+ executable built from
+`system/init`) runs in ring 3 at every boot; a program that crashes is
+terminated without affecting the kernel. Nothing runs Windows applications
+yet (the Win32 subsystem does not exist), there is no desktop yet, and no real
 hardware has been tested yet. See [docs/STATUS.md](docs/STATUS.md) for the
 precise feature list, known bugs and test results, and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
@@ -54,7 +58,8 @@ python tools/mbuild.py run
 
 That builds the boot manager and kernel, writes a bootable GPT disk image to
 `build/meridian.img` and boots it in a QEMU window. The kernel shell accepts
-commands such as `help`, `cpu`, `mem`, `pci`, `acpi`, `uptime` and `shutdown`.
+commands such as `help`, `cpu`, `mem`, `threads`, `ps`, `run init`, `pci`,
+`acpi`, `uptime` and `shutdown`.
 
 Run the automated kernel tests:
 

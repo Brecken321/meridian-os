@@ -5,7 +5,7 @@
 
 use alloc::string::String;
 
-use crate::arch::x86_64::{apic, cpu, idt};
+use crate::arch::x86_64::{apic, idt};
 use crate::drivers::{fbcon, ps2};
 use crate::hal::{acpi, pci, power, serial};
 use crate::ke::{self, clock, irql, pcr};
@@ -28,6 +28,8 @@ const COMMANDS: &[Command] = &[
     Command { name: "pci", help: "PCI devices", run: cmd_pci },
     Command { name: "irq", help: "interrupt statistics", run: cmd_irq },
     Command { name: "threads", help: "kernel threads and scheduler statistics", run: cmd_threads },
+    Command { name: "ps", help: "user-mode processes", run: cmd_ps },
+    Command { name: "run", help: "run a boot module as a user process: run init [arg]", run: cmd_run },
     Command { name: "uptime", help: "time since boot", run: cmd_uptime },
     Command { name: "log", help: "replay the kernel log", run: cmd_log },
     Command { name: "clear", help: "clear the screen", run: cmd_clear },
@@ -270,6 +272,52 @@ fn cmd_threads(_: &str) {
         );
     }
     kprintln!("  context switches: {}", ke::sched::context_switches());
+}
+
+fn cmd_ps(_: &str) {
+    let list = crate::ps::process::list();
+    if list.is_empty() {
+        kprintln!("no user processes are running");
+    }
+    for p in list {
+        let state = match p.exit_status() {
+            Some(s) => alloc::format!("exited ({:#x})", s as u32),
+            None => String::from("running"),
+        };
+        kprintln!(
+            "  {:>5}  {:<16} {:>8} KiB  {:>3} handles  {}",
+            p.id,
+            p.name(),
+            p.space.committed() / 1024,
+            p.handles.lock().open_count(),
+            state
+        );
+    }
+}
+
+fn cmd_run(args: &str) {
+    let mut words = args.split_whitespace();
+    let Some(name) = words.next() else {
+        kprintln!("usage: run <module> [argument]");
+        return;
+    };
+    let arg = words.next().and_then(|a| a.parse::<u64>().ok()).unwrap_or(0);
+    let file = if name.contains('.') { String::from(name) } else { alloc::format!("{name}.exe") };
+    let Some(image) = crate::boot_module(&file) else {
+        kprintln!("no boot module named {file}");
+        return;
+    };
+    match crate::ps::process::spawn(name, image, arg) {
+        Ok(p) => {
+            kprintln!("started process {} ({})", p.id, name);
+            if p.terminated.wait(Some(30_000)) == ke::sched::WaitStatus::Timeout {
+                kprintln!("process {} is still running", p.id);
+            } else {
+                kprintln!("process {} exited with status {:#x}", p.id, p.exit_status().unwrap_or(0) as u32);
+            }
+        }
+        Err(e) => kprintln!("cannot start {file}: {e}"),
+    }
 }
 
 fn cmd_uptime(_: &str) {

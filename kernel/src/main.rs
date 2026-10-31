@@ -21,7 +21,9 @@ mod drivers;
 mod hal;
 mod ke;
 mod mm;
+mod ob;
 mod panic;
+mod ps;
 mod selftest;
 mod shell;
 mod sync;
@@ -49,6 +51,13 @@ pub fn boot_info_opt() -> Option<&'static BootInfo> {
 
 pub fn boot_info() -> &'static BootInfo {
     boot_info_opt().expect("boot information not available")
+}
+
+/// Contents of the boot module called `name` (e.g. `init.exe`).
+pub fn boot_module(name: &str) -> Option<&'static [u8]> {
+    let m = boot_info().modules().iter().find(|m| m.name().eq_ignore_ascii_case(name))?;
+    // SAFETY: boot modules live in BOOT_MODULE memory, which is never reused.
+    Some(unsafe { core::slice::from_raw_parts(mm::phys_to_virt(m.base) as *const u8, m.size as usize) })
 }
 
 pub fn cpu_features() -> &'static cpu::Features {
@@ -82,11 +91,13 @@ pub extern "C" fn kernel_entry(info: *const BootInfo) -> ! {
     init_bsp_descriptors();
     idt::init();
     idt::load();
+    arch::x86_64::syscall::init_processor();
 
     // --- Memory ------------------------------------------------------------
     mm::init(info);
     // SAFETY: the boot identity map was removed by mm::init.
     unsafe { cpu::enable_global_pages(features) };
+    mm::user::init(features.smap);
     let (free, total) = mm::pmm::stats();
     info!("mm: {} MiB of RAM, {} MiB free after boot", total >> 20, free >> 20);
     if info.has_option("mm.verbose") {
@@ -196,6 +207,9 @@ pub extern "C" fn kernel_entry(info: *const BootInfo) -> ! {
 
     let selftest = info.has_option("selftest");
     let started = ke::sched::spawn("shell", ke::thread::priority::NORMAL, move || {
+        if !selftest {
+            start_init();
+        }
         if selftest {
             let (_, failed) = selftest::run_all();
             let code = if failed == 0 { hal::power::QEMU_EXIT_SUCCESS } else { hal::power::QEMU_EXIT_FAILURE };
@@ -208,6 +222,26 @@ pub extern "C" fn kernel_entry(info: *const BootInfo) -> ! {
         panic!("cannot start the shell thread: {e}");
     }
     ke::sched::idle_loop()
+}
+
+/// Runs the first user-mode program and reports how it ended.
+fn start_init() {
+    let Some(image) = boot_module("init.exe") else {
+        warn!("init: \\meridian\\init.exe was not loaded; no user-mode programs will run");
+        return;
+    };
+    match ps::process::spawn("init", image, 0) {
+        Ok(p) => {
+            info!("init: started process {} at image base {:#x}", p.id, p.image_base());
+            p.terminated.wait(Some(10_000));
+            match p.exit_status() {
+                Some(0) => info!("init: exited normally"),
+                Some(s) => warn!("init: exited with status {:#x}", s as u32),
+                None => warn!("init: still running after 10 s"),
+            }
+        }
+        Err(e) => warn!("init: cannot start: {e}"),
+    }
 }
 
 /// Loads the bootstrap processor's GDT/TSS (with interrupt stacks) and

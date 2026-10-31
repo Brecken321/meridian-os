@@ -18,9 +18,9 @@ pub struct Pcr {
     /// Points at this structure; lives at GS:0 so [`current`] is one load.
     pub self_ptr: *const Pcr,
     /// Scratch slot used by the system call entry path (GS:8).
-    pub user_rsp: u64,
-    /// Kernel stack top for system calls (GS:16).
-    pub kernel_rsp: u64,
+    pub user_rsp: AtomicU64,
+    /// Kernel stack top of the current thread for system calls (GS:16).
+    pub kernel_rsp: AtomicU64,
     /// Logical processor number (0 = bootstrap processor).
     pub index: u32,
     pub apic_id: AtomicU32,
@@ -50,8 +50,8 @@ impl Pcr {
     pub const fn new(index: u32, apic_id: u32) -> Self {
         Self {
             self_ptr: ptr::null(),
-            user_rsp: 0,
-            kernel_rsp: 0,
+            user_rsp: AtomicU64::new(0),
+            kernel_rsp: AtomicU64::new(0),
             index,
             apic_id: AtomicU32::new(apic_id),
             ticks: AtomicU64::new(0),

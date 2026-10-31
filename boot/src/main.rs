@@ -35,6 +35,10 @@ const MT_KERNEL_STACK: u32 = 0x8000_0002;
 const MT_PAGE_TABLES: u32 = 0x8000_0003;
 const MT_BOOT_INFO: u32 = 0x8000_0004;
 const MT_AP_TRAMPOLINE: u32 = 0x8000_0005;
+const MT_BOOT_MODULE: u32 = 0x8000_0006;
+
+/// Files loaded for the kernel as boot modules, if present on the volume.
+const MODULE_FILES: &[(&str, &str)] = &[("init.exe", "\\meridian\\init.exe")];
 
 const BOOT_INFO_PAGES: usize = 8;
 const FOUR_GIB: u64 = 4 << 30;
@@ -198,6 +202,25 @@ unsafe fn boot(image: Handle, st: *mut SystemTable) -> Result<Infallible, BootEr
 
     let framebuffer = unsafe { setup_graphics(bs, cmdline_str) };
 
+    // Boot modules are copied into pages of their own memory type so the
+    // kernel can find them after the loader's pool memory is reclaimed.
+    let mut modules = [bi::BootModule::EMPTY; bi::MODULES_MAX];
+    let mut module_count = 0;
+    for (name, path) in MODULE_FILES {
+        let Some(data) = (unsafe { read_file(bs, root, path)? }) else { continue };
+        let pages = data.len().div_ceil(4096).max(1);
+        let base = allocate_pages(bs, MT_BOOT_MODULE, pages)?;
+        // SAFETY: the destination was just allocated with enough pages.
+        unsafe { ptr::copy_nonoverlapping(data.as_ptr(), base as *mut u8, data.len()) };
+        let m = &mut modules[module_count];
+        m.name[..name.len()].copy_from_slice(name.as_bytes());
+        m.name_len = name.len() as u32;
+        m.base = base;
+        m.size = data.len() as u64;
+        module_count += 1;
+        println!("Loaded boot module {name} ({} KiB)", data.len().div_ceil(1024));
+    }
+
     // --- Load the kernel image -------------------------------------------
     let kernel = elf::Elf::parse(kernel_file).map_err(|what| BootError { what, status: LOAD_ERROR })?;
     let Some((lo, hi)) = kernel.span() else {
@@ -283,6 +306,8 @@ unsafe fn boot(image: Handle, st: *mut SystemTable) -> Result<Infallible, BootEr
     }
     info.cmdline = cmdline;
     info.cmdline_len = cmdline_len as u32;
+    info.modules = modules;
+    info.module_count = module_count as u32;
     info.rsdp = rsdp;
     info.uefi_system_table = st as u64;
     info.ap_trampoline = trampoline;
@@ -618,6 +643,7 @@ fn region_kind(efi_type: u32) -> u32 {
         MT_PAGE_TABLES => memory_kind::PAGE_TABLES,
         MT_BOOT_INFO => memory_kind::BOOT_INFO,
         MT_AP_TRAMPOLINE => memory_kind::AP_TRAMPOLINE,
+        MT_BOOT_MODULE => memory_kind::BOOT_MODULE,
         _ => memory_kind::RESERVED,
     }
 }

@@ -75,6 +75,12 @@ const TESTS: &[Test] = &[
     Test { name: "smp.cross_call", run: smp_cross_call },
     Test { name: "smp.tlb_shootdown", run: smp_tlb_shootdown },
     Test { name: "smp.parallel_threads", run: smp_parallel_threads },
+    Test { name: "pe.rejects_bad_images", run: pe_rejects_bad_images },
+    Test { name: "user.init_self_check", run: user_init_self_check },
+    Test { name: "user.fault_isolated", run: user_fault_isolated },
+    Test { name: "user.privileged_instruction", run: user_privileged_instruction },
+    Test { name: "user.kernel_memory_protected", run: user_kernel_memory_protected },
+    Test { name: "user.memory_reclaimed", run: user_memory_reclaimed },
 ];
 
 /// Runs every test; returns (passed, failed).
@@ -672,5 +678,74 @@ fn smp_parallel_threads() -> TestResult {
     }
     let used = seen.load(Ordering::Relaxed).count_ones() as usize;
     ensure!(used >= 2, "threads ran on only {used} of {cpus} processors");
+    Ok(())
+}
+
+fn init_image() -> Result<&'static [u8], String> {
+    crate::boot_module("init.exe").ok_or_else(|| String::from("boot module init.exe is missing"))
+}
+
+/// Runs init.exe in `mode` and returns its exit status.
+fn run_init(mode: u64) -> Result<i64, String> {
+    let p = crate::ps::process::spawn("init-test", init_image()?, mode)?;
+    ensure!(p.terminated.wait(Some(10_000)) == WaitStatus::Signaled, "process {} did not exit within 10 s", p.id);
+    p.exit_status().ok_or_else(|| String::from("terminated process has no exit status"))
+}
+
+fn pe_rejects_bad_images() -> TestResult {
+    use crate::mm::user::AddressSpace;
+    let space = AddressSpace::new().ok_or("out of memory")?;
+    let image = init_image()?;
+    let cases: [(&str, &[u8]); 4] = [
+        ("empty", &[]),
+        ("garbage", b"this is not an executable at all"),
+        ("truncated", &image[..200.min(image.len())]),
+        ("headers only", &image[..1024.min(image.len())]),
+    ];
+    for (what, data) in cases {
+        ensure!(crate::ps::pe::load(&space, data).is_err(), "loader accepted a {what} image");
+    }
+    let mut corrupted = image.to_vec();
+    corrupted[0x3C] = 0xF0; // e_lfanew points past the end
+    corrupted[0x3D] = 0xFF;
+    ensure!(crate::ps::pe::load(&space, &corrupted).is_err(), "loader accepted a corrupted header");
+    ensure!(space.committed() == 0, "failed loads left memory committed");
+    Ok(())
+}
+
+fn user_init_self_check() -> TestResult {
+    let status = run_init(0)?;
+    ensure!(status == 0, "init self check failed with status {status:#x} (see the log above)");
+    Ok(())
+}
+
+fn user_fault_isolated() -> TestResult {
+    let status = run_init(1)?;
+    ensure!(status == meridian_abi::status::ACCESS_VIOLATION, "expected ACCESS_VIOLATION, got {status:#x}");
+    Ok(())
+}
+
+fn user_privileged_instruction() -> TestResult {
+    let status = run_init(2)?;
+    ensure!(status == meridian_abi::status::PRIVILEGED_INSTRUCTION, "expected PRIVILEGED_INSTRUCTION, got {status:#x}");
+    Ok(())
+}
+
+fn user_kernel_memory_protected() -> TestResult {
+    let status = run_init(3)?;
+    ensure!(status == meridian_abi::status::ACCESS_VIOLATION, "user code read kernel memory (status {status:#x})");
+    Ok(())
+}
+
+fn user_memory_reclaimed() -> TestResult {
+    run_init(0)?;
+    sched::sleep_ms(10);
+    let (before, _) = pmm::stats();
+    for _ in 0..5 {
+        ensure!(run_init(0)? == 0, "init failed");
+    }
+    sched::sleep_ms(10);
+    let (after, _) = pmm::stats();
+    ensure!(before.abs_diff(after) <= 16 * PAGE_SIZE, "processes leaked {} KiB", (before as i64 - after as i64) / 1024);
     Ok(())
 }

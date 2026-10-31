@@ -133,6 +133,21 @@ pub unsafe fn unmap(pml4: u64, va: u64) -> Option<u64> {
     Some(pa)
 }
 
+/// Replaces the flags of the 4 KiB mapping at `va`, keeping its frame.
+/// Returns false if `va` is not mapped. The caller flushes TLBs.
+///
+/// # Safety
+/// The caller must own `va` in this address space.
+pub unsafe fn set_flags(pml4: u64, va: u64, flags: u64) -> bool {
+    match walk(pml4, va, false, false) {
+        Ok(pte) if *pte & PRESENT != 0 => {
+            *pte = (*pte & ADDR_MASK) | flags | PRESENT;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Translates `va` to (physical address, leaf flags), following huge pages.
 pub fn translate(pml4: u64, va: u64) -> Option<(u64, u64)> {
     let mut t = pml4;

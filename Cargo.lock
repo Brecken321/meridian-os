@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "meridian-abi"
+version = "0.1.0"
+
+[[package]]
 name = "meridian-boot"
 version = "0.1.0"
 dependencies = [
@@ -14,8 +18,23 @@ name = "meridian-bootinfo"
 version = "0.1.0"
 
 [[package]]
+name = "meridian-init"
+version = "0.1.0"
+dependencies = [
+ "meridian-rt",
+]
+
+[[package]]
 name = "meridian-kernel"
 version = "0.1.0"
 dependencies = [
+ "meridian-abi",
  "meridian-bootinfo",
+]
+
+[[package]]
+name = "meridian-rt"
+version = "0.1.0"
+dependencies = [
+ "meridian-abi",
 ]

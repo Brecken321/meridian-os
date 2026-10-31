@@ -13,3 +13,4 @@ bench = false
 
 [dependencies]
 meridian-bootinfo = { path = "../shared/bootinfo" }
+meridian-abi = { path = "../shared/abi" }

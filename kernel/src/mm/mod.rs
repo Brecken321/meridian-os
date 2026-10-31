@@ -19,6 +19,7 @@ pub mod heap;
 pub mod kva;
 pub mod paging;
 pub mod pmm;
+pub mod user;
 
 use meridian_bootinfo::{BootInfo, HHDM_BASE};
 

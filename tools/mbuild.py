@@ -15,6 +15,7 @@ The disk image is a GPT disk with one EFI System Partition (FAT32) holding
   EFI/BOOT/BOOTX64.EFI   Meridian Boot Manager
   MERIDIAN/KERNEL.ELF    the kernel
   MERIDIAN/CMDLINE.TXT   kernel command line
+  MERIDIAN/INIT.EXE      first user-mode program (PE32+)
 It never touches real disks: it is only ever written to build/meridian.img.
 """
 
@@ -49,16 +50,33 @@ BOOT_MARKER = "boot: kernel initialised"
 # Compilation
 # --------------------------------------------------------------------------
 
-def cargo_build(release: bool) -> tuple[Path, Path]:
+# Native Meridian programs are PE32+ images built with the MSVC-ABI target
+# and linked by Rust's bundled lld (no Microsoft tools or libraries).
+USER_TARGET = "x86_64-pc-windows-msvc"
+USER_PROGRAMS = [("meridian-init", "init", "INIT.EXE")]
+USER_LINK_FLAGS = [
+    "-C", "linker=rust-lld", "-C", "linker-flavor=lld-link",
+    "-C", "link-arg=-nodefaultlib", "-C", "link-arg=-entry:meridian_start",
+    "-C", "link-arg=-subsystem:native",
+]
+
+
+def cargo_build(release: bool) -> tuple[Path, Path, dict[str, Path]]:
     profile = "release" if release else "debug"
     flags = ["--release"] if release else []
     for package, target in (("meridian-boot", "x86_64-unknown-uefi"), ("meridian-kernel", "x86_64-unknown-none")):
         cmd = ["cargo", "build", "-p", package, "--target", target, *flags]
         print("+", " ".join(cmd), flush=True)
         subprocess.run(cmd, cwd=ROOT, check=True)
+    programs = {}
+    for package, binary, image_name in USER_PROGRAMS:
+        cmd = ["cargo", "rustc", "-p", package, "--target", USER_TARGET, *flags, "--", *USER_LINK_FLAGS]
+        print("+", " ".join(cmd), flush=True)
+        subprocess.run(cmd, cwd=ROOT, check=True)
+        programs[image_name] = ROOT / "target" / USER_TARGET / profile / f"{binary}.exe"
     boot = ROOT / "target" / "x86_64-unknown-uefi" / profile / "bootx64.efi"
     kernel = ROOT / "target" / "x86_64-unknown-none" / profile / "kernel"
-    return boot, kernel
+    return boot, kernel, programs
 
 
 # --------------------------------------------------------------------------
@@ -212,10 +230,13 @@ def gpt_image(partition: bytes, disk_size: int) -> bytes:
     return bytes(disk)
 
 
-def make_image(boot: Path, kernel: Path, cmdline: str, out: Path) -> None:
+def make_image(boot: Path, kernel: Path, programs: dict[str, Path], cmdline: str, out: Path) -> None:
+    meridian = {"KERNEL.ELF": kernel.read_bytes(), "CMDLINE.TXT": cmdline.encode("utf-8")}
+    for name, path in programs.items():
+        meridian[name] = path.read_bytes()
     tree = {
         "EFI": {"BOOT": {"BOOTX64.EFI": boot.read_bytes()}},
-        "MERIDIAN": {"KERNEL.ELF": kernel.read_bytes(), "CMDLINE.TXT": cmdline.encode("utf-8")},
+        "MERIDIAN": meridian,
     }
     part_sectors = DISK_SIZE // SECTOR - PARTITION_START - 34
     fs = Fat32(part_sectors, "MERIDIAN")
@@ -281,8 +302,8 @@ def qemu_command(args, headless: bool, extra: list[str]) -> list[str]:
 
 
 def prepare(args, cmdline: str) -> None:
-    boot, kernel = cargo_build(args.release)
-    make_image(boot, kernel, cmdline.strip(), BUILD / "meridian.img")
+    boot, kernel, programs = cargo_build(args.release)
+    make_image(boot, kernel, programs, cmdline.strip(), BUILD / "meridian.img")
 
 
 def cmd_build(args) -> int:

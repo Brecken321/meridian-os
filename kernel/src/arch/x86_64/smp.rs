@@ -260,6 +260,7 @@ extern "C" fn ap_entry(pcr: *mut Pcr) -> ! {
         pcr::install(pcr);
     }
     idt::load();
+    super::syscall::init_processor();
     apic::init_local();
     let me = pcr::current();
     sched::init_processor(me, &format!("idle-{}", me.index));

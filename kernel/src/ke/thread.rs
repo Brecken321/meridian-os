@@ -1,12 +1,14 @@
 //! Kernel thread objects.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use super::objects::{Event, WaitObject};
 use crate::mm::kva::{self, KernelStack};
+use crate::ps::process::Process;
 
 /// Thread scheduling priorities: 1-15 are variable (normal) priorities,
 /// 16-31 real-time. 0 is reserved for the per-processor idle threads.
@@ -81,6 +83,8 @@ pub struct Thread {
     pub(super) last_cpu: AtomicU32,
     /// Signalled when the thread terminates (used to join it).
     pub terminated: Event,
+    /// The process a user-mode thread belongs to (`None` for kernel threads).
+    process: Option<Arc<Process>>,
 }
 
 // SAFETY: interior-mutable fields are either atomics or only accessed with
@@ -95,6 +99,7 @@ impl Thread {
         priority: u8,
         stack: Option<KernelStack>,
         entry: Option<ThreadEntry>,
+        process: Option<Arc<Process>>,
     ) -> Self {
         let mut buf = [0u8; 24];
         let len = name.len().min(buf.len());
@@ -113,7 +118,17 @@ impl Thread {
             cpu_ticks: AtomicU64::new(0),
             last_cpu: AtomicU32::new(0),
             terminated: Event::new(true, false),
+            process,
         }
+    }
+
+    pub fn process(&self) -> Option<Arc<Process>> {
+        self.process.clone()
+    }
+
+    /// Page table root this thread runs on.
+    pub(super) fn page_table_root(&self) -> u64 {
+        self.process.as_ref().map_or_else(crate::mm::paging::kernel_pml4, |p| p.space.pml4())
     }
 
     pub fn name(&self) -> &str {

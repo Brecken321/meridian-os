@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["boot", "kernel", "shared/bootinfo"]
+members = ["boot", "kernel", "runtime/rt", "shared/abi", "shared/bootinfo", "system/init"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,9 @@ repository = "https://github.com/Brecken321/meridian-os"
 [profile.dev]
 # Unoptimised kernel code is painfully slow under QEMU's TCG emulator.
 opt-level = 1
+# Kernel, boot manager and Meridian programs never unwind.
+panic = "abort"
 
 [profile.release]
 debug = "line-tables-only"
+panic = "abort"
