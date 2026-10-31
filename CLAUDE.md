@@ -23,7 +23,9 @@ before starting; update both when a milestone moves.
 ## Layout
 
 - `boot/` UEFI boot manager (own UEFI bindings), `shared/bootinfo/` handoff ABI
-- `kernel/src/{arch/x86_64,hal,ke,mm,drivers}` + `shell.rs`, `selftest.rs`, `panic.rs`
+- `kernel/src/{arch/x86_64,hal,ke,mm,ob,ps,drivers}` + `shell.rs`, `selftest.rs`, `panic.rs`
+- `shared/abi/` syscall numbers + NTSTATUS; `runtime/rt/` native user runtime; `system/init/` first program
+- User programs: PE32+ via `cargo rustc --target x86_64-pc-windows-msvc` + rust-lld (see `USER_PROGRAMS` in mbuild.py)
 - `tools/mbuild.py` build/run/test/screenshot; writes GPT+FAT32 image itself
 - Languages: Rust (kernel/services), C (Win32 DLLs, later), C++ (desktop/COM, later)
 

@@ -76,8 +76,10 @@ The user asked for Rust, C and C++, each where it fits best:
 | **C++** *(planned)* | Desktop shell, compositor and UI toolkit, COM/OLE, DirectX translation layers | COM is defined in terms of C++ vtables; existing translation layers (DXVK, VKD3D-Proton) are C++ |
 | **Assembly** | Interrupt entry stubs, context switching, the SMP trampoline | Inline in Rust via `asm!`/`global_asm!`; no separate assembler needed |
 
-C and C++ will be compiled with Clang (LLVM) targeting Meridian's PE32+
-format. Clang is not needed until the first user-mode component lands.
+Native Rust programs are built with the `x86_64-pc-windows-msvc` target and
+linked by Rust's bundled `lld-link` with no system libraries, which yields
+PE32+ images with the Windows x64 calling convention on any build host. C and
+C++ components will be compiled with Clang (LLVM) for the same format.
 
 ## Executable format
 
@@ -111,15 +113,19 @@ produces; only the boot manager reads it.
 | `kernel/src/ke/` | IRQL, per-processor control region, clock |
 | `kernel/src/mm/` | Physical allocator, paging, kernel virtual space, pool |
 | `kernel/src/drivers/` | Framebuffer console, PS/2 keyboard |
+| `kernel/src/ob/` | Object manager (handle tables) |
+| `kernel/src/ps/` | Processes, PE32+ loader, system call services |
 | `kernel/src/shell.rs` | Kernel debug shell |
+| `shared/abi/` | System call numbers and NTSTATUS codes (kernel â†” user) |
+| `runtime/rt/` | Native user-mode runtime (system calls, memory intrinsics, panic handler) |
+| `system/init/` | First user-mode program |
 | `kernel/src/selftest.rs` | In-kernel test suite |
 | `kernel/assets/` | Console font (Spleen, BSD-2-Clause) |
 | `tools/` | Build tool, disk image writer, font converter |
 | `docs/` | Documentation |
 
 Planned top-level directories as components arrive: `executive/` (if the
-executive is split out of the kernel crate), `system/` (user-mode services),
-`runtime/` (native runtime and C library), `wincompat/` (Win32 subsystem),
+executive is split out of the kernel crate), `wincompat/` (Win32 subsystem),
 `graphics/`, `desktop/`, `shell/`, `applications/`, `filesystem/`,
 `network/`, `audio/`, `sdk/`, `installer/`, `tests/` (host-side and
 application compatibility tests).

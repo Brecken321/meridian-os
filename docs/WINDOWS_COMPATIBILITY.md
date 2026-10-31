@@ -1,7 +1,11 @@
 # Windows application compatibility
 
-**Current state: not implemented.** No Windows program runs on Meridian yet.
-This document is the plan and the rules.
+**Current state: foundations only.** No Windows program runs on Meridian
+yet. What exists: a PE32+ loader (headers, sections, protections, base
+relocations) that already runs native Meridian programs, NTSTATUS-compatible
+status codes, NT-style handle values and system call semantics modelled on
+the native NT API. Imports, TLS, exception tables and every Win32 DLL are
+still to be written. This document is the plan and the rules.
 
 ## Approach
 

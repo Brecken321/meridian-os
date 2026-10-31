@@ -152,6 +152,34 @@ maintains the tick count; `clock::uptime_us()` uses the TSC. Tickless
 Planned: wait-for-multiple-objects, APCs, priority boosts and decay, timer
 objects, per-processor ready queues and load balancing.
 
+## User mode (`mm/user.rs`, `ps/`, `ob/`, `arch/x86_64/syscall.rs`)
+
+* **Address spaces**: one PML4 per process; slots 256-511 point at the
+  shared kernel PDPTs. User memory is tracked as committed regions and fully
+  released when the address space is dropped (after the last thread has been
+  switched out). The first and last 64 KiB of user space are never mapped.
+* **Switching**: `switch_locked` loads the incoming thread's page-table root
+  (the kernel PML4 for kernel threads) and points TSS.RSP0 and the PCR's
+  system-call stack slot at its kernel stack.
+* **Entering ring 3**: `enter_user` builds an `iretq` frame (user CS/SS,
+  RFLAGS.IF set), clears every general-purpose register except the argument
+  in RCX, and executes `swapgs; iretq`.
+* **System calls**: `syscall` enters `meridian_syscall_entry`, which switches
+  to the thread's kernel stack, saves a `SyscallFrame`, enables interrupts
+  and calls the service dispatcher (`ps/syscall.rs`). Arguments follow
+  `shared/abi`; results are non-negative values or negative NTSTATUS codes.
+  Return goes through `sysretq` after checking that the return address is
+  canonical.
+* **User pointers**: `copy_from_user`/`copy_to_user` range-check against
+  user space and copy with `rep movsb` registered in the fixup table (with
+  `stac`/`clac` when SMAP is on), so a bad pointer returns an error.
+* **Faults**: any CPU exception raised in ring 3 terminates the process with
+  the matching NTSTATUS code and logs the faulting address.
+* **Handles** (`ob/`): per-process tables; handle values are multiples of 4.
+* **PE32+ loader** (`ps/pe.rs`): validates headers, maps sections with
+  per-section protections, applies DIR64 relocations, sizes the stack;
+  rejects images that need imports or TLS.
+
 ## Multiprocessor support (`arch/x86_64/smp.rs`, `ke/ipi.rs`)
 
 * **Startup**: the boot manager reserves a page below 1 MiB. The kernel

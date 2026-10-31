@@ -18,7 +18,7 @@ command line, and the kernel:
 A kernel crash during the tests exits QEMU with the failure code, and a hang
 is caught by the harness timeout, so CI never waits forever.
 
-Current tests (35):
+Current tests (41):
 
 | Test | Checks |
 |------|--------|
@@ -57,6 +57,12 @@ Current tests (35):
 | `smp.cross_call` | A function sent by IPI runs on each processor |
 | `smp.tlb_shootdown` | After remapping a page, another processor never sees the stale translation |
 | `smp.parallel_threads` | High-priority CPU-bound threads spread across processors |
+| `pe.rejects_bad_images` | Empty, garbage, truncated and corrupted images are rejected without leaking memory |
+| `user.init_self_check` | `init.exe` runs in ring 3 and passes its own checks of memory, events, handles, timeouts and argument validation |
+| `user.fault_isolated` | A user write to an unmapped address ends only that process (ACCESS_VIOLATION) |
+| `user.privileged_instruction` | A privileged instruction in ring 3 ends only that process (PRIVILEGED_INSTRUCTION) |
+| `user.kernel_memory_protected` | User code cannot read kernel memory |
+| `user.memory_reclaimed` | Five complete process lifetimes leak no memory |
 
 ### Adding a test
 
@@ -72,8 +78,8 @@ QEMU + OVMF from apt):
 2. self tests, debug build
 3. self tests, release build
 4. boot screenshot
-5. interactive shell check: `mbuild.py exec help cpu mem irq shutdown
-   --expect-poweroff` types commands on the emulated PS/2 keyboard (through
+5. interactive shell check: `mbuild.py exec help ps "run init 1" "run init"
+   shutdown --expect-poweroff` types commands on the emulated PS/2 keyboard (through
    QEMU's QMP `send-key`) and requires the VM to power itself off through
    ACPI, which exercises the keyboard driver, I/O APIC routing, the shell and
    ACPI S5 end to end

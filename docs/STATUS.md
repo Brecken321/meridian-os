@@ -36,15 +36,27 @@ the self tests or was verified manually in QEMU as noted.
   newly ready threads on idle or lower-priority processors.
 * Interrupt-driven console input: PS/2 keyboard and COM1 receive interrupts
   wake the shell thread through a DPC and an event.
-* Kernel shell: help, ver, cpu, mem, acpi, pci, irq, threads, uptime, log,
-  clear, selftest, reboot, shutdown, crash.
+* User mode: per-process address spaces (private lower half, shared kernel
+  half), ring-3 threads, SYSCALL/SYSRET system call entry with 14 services
+  (debug output, exit, yield, sleep, ids, memory allocate/free, events, wait,
+  close handle, uptime), per-process handle tables, argument validation with
+  fault-safe user copies, CPU exceptions in user mode terminate only the
+  process (with NTSTATUS codes), complete teardown of process memory.
+* PE32+ loader: header validation, section mapping with per-section
+  protections, DIR64 base relocations (images are loaded 256 MiB above their
+  preferred base, so relocation is always exercised), stack sizing.
+* Native runtime (`runtime/rt`) and the first program `init.exe`
+  (`system/init`), loaded by the boot manager as a boot module and run at
+  every boot.
+* Kernel shell: help, ver, cpu, mem, acpi, pci, irq, threads, ps, run, uptime,
+  log, clear, selftest, reboot, shutdown, crash.
 * Build: reproducible GPT/FAT32 image writer, QEMU runner, self-test harness,
   screenshot capture, GitHub Actions CI.
 
 ## Not implemented yet
 
-System calls, user mode, processes, object manager,
-any storage driver, any filesystem, USB, networking, audio, GPU acceleration,
+Multi-threaded user processes, process creation from user mode, object
+namespace and access checks, PE imports/TLS, any storage driver, any filesystem, USB, networking, audio, GPU acceleration,
 desktop, Windows compatibility, installer. See [ROADMAP.md](ROADMAP.md).
 
 ## Known limitations
@@ -53,6 +65,9 @@ desktop, Windows compatibility, installer. See [ROADMAP.md](ROADMAP.md).
   simple and correct but will contend on many-core machines. Per-processor
   queues are planned.
 * No thread affinity, wait-for-multiple-objects, APCs or priority boosting yet.
+* User processes have exactly one thread; user programs come from boot
+  modules (no filesystem yet); all user memory is committed up front (no
+  demand paging); programs must not import DLLs.
 * Every TLB shootdown interrupts all other processors (no tracking of which
   processors might cache the address).
 * The direct map uses 2 MiB pages across all physical memory below the top of
@@ -79,8 +94,8 @@ None open. Fixed during bring-up (2026-10-31):
 
 ## Failed tests
 
-None. Latest local runs: 35/35 passed (debug and release; 1, 2 and 4 vCPUs;
-five consecutive 4-vCPU runs).
+None. Latest local runs: 41/41 passed (debug and release; 1 and 4 vCPUs;
+repeated 4-vCPU runs).
 
 ## Real hardware tested
 

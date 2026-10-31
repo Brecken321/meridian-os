@@ -95,10 +95,10 @@ Update this file whenever a milestone moves.
 
 ## Next session starts here
 
-1. Object manager: typed, reference-counted kernel objects, a namespace
-   (`\Device`, `\ObjectTypes`, ...) and per-process handle tables with
-   granted-access masks.
-2. Process objects and user address spaces (PML4 per process sharing the
-   kernel half), SYSCALL/SYSRET entry with a service table, safe user-memory
-   copy routines built on the fixup table, and the first ring-3 program.
-3. PE32+ loader for that first program (native subsystem).
+1. User-mode thread creation and multi-threaded process termination; process
+   creation from user mode (so init can start other programs).
+2. I/O manager and driver model; PCIe ECAM/MSI; first storage driver
+   (virtio-blk or AHCI) and a read-only FAT32 filesystem, so programs load
+   from disk instead of as boot modules.
+3. PE imports (a native `msys.dll`), which is also the first step towards
+   loading Win32 DLLs.
