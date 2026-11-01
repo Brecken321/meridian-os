@@ -1,0 +1,13 @@
+[package]
+name = "meridian-rt"
+description = "Native Meridian user-mode runtime: system calls, memory intrinsics, program entry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+test = false
+bench = false
+
+[dependencies]
+meridian-abi = { path = "../../shared/abi" }
