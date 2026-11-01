@@ -66,6 +66,13 @@ static READY_SUMMARY: AtomicU32 = AtomicU32::new(0);
 static STARTED: AtomicBool = AtomicBool::new(false);
 static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
 
+/// Terminated threads whose last reference was dropped during a context
+/// switch. Freeing a kernel stack unmaps memory (and so shoots down TLBs on
+/// other processors), which must not happen in the switch path where
+/// interrupts may be disabled; the reaper thread frees them instead.
+static REAP_LIST: crate::sync::SpinLock<Vec<Arc<Thread>>> = crate::sync::SpinLock::new(Vec::new());
+static REAPER_WAKE: super::objects::Event = super::objects::Event::new(false, false);
+
 fn acquire() -> Irql {
     let old = irql::raise(DISPATCH_LEVEL);
     while LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
@@ -139,6 +146,14 @@ pub fn init() {
     idt::register(vectors::DISPATCH, dispatch_interrupt);
     init_processor(pcr::current(), "idle-0");
     STARTED.store(true, Ordering::Release);
+    spawn("reaper", priority::HIGH, || {
+        loop {
+            REAPER_WAKE.wait(None);
+            let dead = core::mem::take(&mut *REAP_LIST.lock());
+            drop(dead); // frees stacks with interrupts enabled at PASSIVE_LEVEL
+        }
+    })
+    .expect("cannot start the reaper thread");
 }
 
 /// Creates a kernel thread and makes it ready to run.
@@ -311,7 +326,11 @@ fn finish_switch() {
     release();
     if !prev.is_null() {
         // SAFETY: this is the reference the current-thread slot held.
-        drop(unsafe { Arc::from_raw(prev) });
+        let prev = unsafe { Arc::from_raw(prev) };
+        if Arc::strong_count(&prev) == 1 {
+            REAP_LIST.lock().push(prev);
+            REAPER_WAKE.set();
+        }
     }
 }
 

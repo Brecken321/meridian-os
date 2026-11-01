@@ -35,7 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 SECTOR = 512
-DISK_SIZE = 64 * 1024 * 1024
+DISK_SIZE = 48 * 1024 * 1024
 PARTITION_START = 2048
 ESP_TYPE = uuid.UUID("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
 # Fixed GUIDs and timestamps keep the image byte-for-byte reproducible.

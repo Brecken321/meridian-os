@@ -13,6 +13,11 @@ repository = "https://github.com/Brecken321/meridian-os"
 opt-level = 1
 # Kernel, boot manager and Meridian programs never unwind.
 panic = "abort"
+# Keep build output small: line tables are enough for stack traces and
+# tools/symbolize.py, and incremental caches are large for little gain on
+# crates this size.
+debug = "line-tables-only"
+incremental = false
 
 [profile.release]
 debug = "line-tables-only"

@@ -260,6 +260,10 @@ fn handle_exception(frame: &mut TrapFrame) {
     // Faults raised by user code terminate that process, never the kernel.
     // (NMI, double fault and machine check are platform events.)
     if frame.from_user_mode() && !matches!(frame.vector, 2 | 8 | 18) {
+        // The interrupted context was user mode, so this handler may take
+        // interrupts (and must, to answer other processors' IPIs).
+        // SAFETY: running at PASSIVE_LEVEL on the faulting thread's stack.
+        unsafe { cpu::enable_interrupts() };
         crate::ps::process::user_exception(frame);
     }
     match frame.vector {

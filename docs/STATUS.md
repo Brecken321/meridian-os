@@ -91,11 +91,22 @@ None open. Fixed during bring-up (2026-10-31):
 * PS/2 initialisation wrote back a controller configuration with the
   keyboard-disable bit still set, so no key presses arrived. Now covered by
   the CI step that types shell commands through QEMU's keyboard.
+* SMP deadlock: a terminated thread's stack was freed during the context
+  switch, sometimes with interrupts disabled, and the resulting TLB
+  shootdown could wait forever on another processor doing the same. Dead
+  threads now go to a reaper thread, and every processor waiting on others
+  services TLB flush requests addressed to it.
+* xAPIC IPIs could be misdirected: an interrupt arriving between the two
+  ICR register writes could overwrite the destination. The write sequence
+  now runs with interrupts disabled.
+* Found by repeated test runs: the IPI handler could drop a TLB flush request
+  (introduced while fixing the first issue). Shootdown timeouts now name the
+  processor that failed to respond and the thread it was running.
 
 ## Failed tests
 
-None. Latest local runs: 41/41 passed (debug and release; 1 and 4 vCPUs;
-repeated 4-vCPU runs).
+None. Latest local runs: 41/41 passed in 24 consecutive runs (12 debug,
+12 release, 4 vCPUs).
 
 ## Real hardware tested
 

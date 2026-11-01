@@ -42,6 +42,7 @@ All commands run from the repository root.
 | Command | What it does |
 |---------|--------------|
 | `python tools/mbuild.py build` | Compile boot manager + kernel, write `build/meridian.img` |
+| `run-meridian.cmd` (Windows) | Release build + QEMU window; double-click to try Meridian |
 | `python tools/mbuild.py run` | Build and boot in a QEMU window; the kernel log and shell also appear in your terminal |
 | `python tools/mbuild.py run --headless` | Same without a window (serial console only) |
 | `python tools/mbuild.py test` | Build and run the kernel self tests headless; exit code 0 = pass |
@@ -56,6 +57,14 @@ have enabled it) or `--accel kvm` (Linux).
 Overrides: `MERIDIAN_QEMU` (QEMU binary), `MERIDIAN_OVMF_CODE` and
 `MERIDIAN_OVMF_VARS` (firmware images).
 
+## Disk usage
+
+The build is kept small on purpose: debug builds carry only line tables and
+no incremental caches, so `target/` stays around 15 MB, and the disk image
+is 48 MB. `python tools/mbuild.py clean` deletes both. QEMU itself is the
+largest dependency (the Windows installer includes emulators for many CPU
+architectures; Meridian only uses `qemu-system-x86_64`).
+
 ## Kernel command line
 
 `build/meridian.img` contains `\MERIDIAN\CMDLINE.TXT`. Options:
@@ -68,7 +77,7 @@ Overrides: `MERIDIAN_QEMU` (QEMU binary), `MERIDIAN_OVMF_CODE` and
 
 ## Disk image layout
 
-GPT disk, 64 MiB, one EFI System Partition (FAT32) starting at LBA 2048:
+GPT disk, 48 MiB, one EFI System Partition (FAT32) starting at LBA 2048:
 
 ```
 EFI/BOOT/BOOTX64.EFI   Meridian Boot Manager

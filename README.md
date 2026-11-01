@@ -50,14 +50,18 @@ You need Rust (stable), Python 3 and QEMU. On Windows:
 winget install SoftwareFreedomConservancy.QEMU
 ```
 
-Then, from the repository root:
+Then, on Windows, double-click **`run-meridian.cmd`** in the repository
+folder (or run it from a terminal). Anywhere else, run:
 
 ```bash
-python tools/mbuild.py run
+python tools/mbuild.py run --release
 ```
 
-That builds the boot manager and kernel, writes a bootable GPT disk image to
-`build/meridian.img` and boots it in a QEMU window. The kernel shell accepts
+That builds the boot manager, kernel and user programs, writes a bootable
+GPT disk image to `build/meridian.img` and boots it in a QEMU window. Click
+inside the window to type. Build output stays small (about 15 MB in
+`target/` plus the 48 MB disk image) and `python tools/mbuild.py clean`
+removes all of it. The kernel shell accepts
 commands such as `help`, `cpu`, `mem`, `threads`, `ps`, `run init`, `pci`,
 `acpi`, `uptime` and `shutdown`.
 

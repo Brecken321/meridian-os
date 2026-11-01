@@ -134,10 +134,20 @@ fn send_icr(dest: u32, low: u32) {
         // SAFETY: x2APIC ICR is a single 64-bit MSR.
         unsafe { cpu::wrmsr(0x830, (dest as u64) << 32 | low as u64) };
     } else {
+        // The xAPIC ICR is two registers. An interrupt between the two
+        // writes whose handler sends its own IPI would overwrite the
+        // destination and misdirect this one, so keep the sequence atomic.
+        let interrupts_were_on = cpu::interrupts_enabled();
+        // SAFETY: interrupts are restored below.
+        unsafe { cpu::disable_interrupts() };
         write(REG_ICR_HIGH, dest << 24);
         write(REG_ICR_LOW, low);
         while read(REG_ICR_LOW) & ICR_PENDING != 0 {
             core::hint::spin_loop();
+        }
+        if interrupts_were_on {
+            // SAFETY: restoring the caller's interrupt state.
+            unsafe { cpu::enable_interrupts() };
         }
     }
 }
