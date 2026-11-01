@@ -63,7 +63,10 @@ The build is kept small on purpose: debug builds carry only line tables and
 no incremental caches, so `target/` stays around 15 MB, and the disk image
 is 48 MB. `python tools/mbuild.py clean` deletes both. QEMU itself is the
 largest dependency (the Windows installer includes emulators for many CPU
-architectures; Meridian only uses `qemu-system-x86_64`).
+architectures; Meridian only uses `qemu-system-x86_64`). On Windows,
+`tools\slim-qemu.ps1 -WhatIf` lists the other emulators and firmware (about
+940 MB) and running it without `-WhatIf` removes them after an
+administrator prompt; reinstalling QEMU with winget undoes it.
 
 ## Kernel command line
 
