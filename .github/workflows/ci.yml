@@ -37,7 +37,10 @@ jobs:
           python3 tools/mbuild.py exec help ps "run init 1" 'dir C:\MERIDIAN' \
             'type "C:\Welcome to Meridian.txt"' 'run C:\MERIDIAN\INIT.EXE' shutdown --release --expect-poweroff
 
-      - name: Upload logs, screenshot and disk image
+      - name: Desktop walk-through (mouse and keyboard), ending in Start > Shut down
+        run: python3 tools/mbuild.py ui --release --expect-poweroff
+
+      - name: Upload logs, screenshots and disk image
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -45,5 +48,6 @@ jobs:
           path: |
             build/*.log
             build/*.png
+            build/ui/*.png
             build/meridian.img
           if-no-files-found: ignore

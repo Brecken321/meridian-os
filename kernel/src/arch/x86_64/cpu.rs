@@ -140,6 +140,18 @@ pub fn rdtsc() -> u64 {
     (hi as u64) << 32 | lo as u64
 }
 
+/// Saves the x87/SSE register state to a 16-byte aligned 512-byte area.
+#[inline]
+pub unsafe fn fxsave(area: *mut u8) {
+    unsafe { asm!("fxsave64 [{}]", in(reg) area, options(nostack, preserves_flags)) };
+}
+
+/// Restores the x87/SSE register state saved by [`fxsave`].
+#[inline]
+pub unsafe fn fxrstor(area: *const u8) {
+    unsafe { asm!("fxrstor64 [{}]", in(reg) area, options(nostack, preserves_flags)) };
+}
+
 #[inline]
 pub unsafe fn invlpg(addr: u64) {
     unsafe { asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
@@ -277,6 +289,9 @@ pub fn detect() -> Features {
 }
 
 const CR0_WP: u64 = 1 << 16;
+const CR0_MP: u64 = 1 << 1;
+const CR0_EM: u64 = 1 << 2;
+const CR0_TS: u64 = 1 << 3;
 const CR4_PGE: u64 = 1 << 7;
 const CR4_OSFXSR: u64 = 1 << 9;
 const CR4_OSXMMEXCPT: u64 = 1 << 10;
@@ -295,7 +310,9 @@ const EFER_NXE: u64 = 1 << 11;
 /// Must run on each processor during early initialisation.
 pub unsafe fn enable_protection_features(f: &Features) {
     unsafe {
-        write_cr0(read_cr0() | CR0_WP);
+        // Write protection in ring 0; SSE/x87 usable without traps
+        // (MP set, EM and TS clear). The kernel itself never uses them.
+        write_cr0((read_cr0() | CR0_WP | CR0_MP) & !(CR0_EM | CR0_TS));
         let mut cr4 = read_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT;
         if f.smep {
             cr4 |= CR4_SMEP;

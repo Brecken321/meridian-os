@@ -216,6 +216,7 @@ pub extern "C" fn kernel_entry(info: *const BootInfo) -> ! {
         fs::init_storage();
         if !selftest {
             start_init();
+            start_desktop();
         }
         if selftest {
             let (_, failed) = selftest::run_all();
@@ -264,6 +265,23 @@ fn start_init() {
             }
         }
         Err(e) => error!("init: cannot start: {e}"),
+    }
+}
+
+/// Starts the graphical desktop (a user-mode program) unless the kernel
+/// command line says `nodesktop`.
+fn start_desktop() {
+    const PATH: &str = "C:\\MERIDIAN\\DESKTOP.EXE";
+    if boot_info().has_option("nodesktop") {
+        info!("desktop: not started (nodesktop)");
+        return;
+    }
+    match fs::read_file(PATH) {
+        Ok(image) => match ps::process::spawn("desktop", &image, 0) {
+            Ok(p) => info!("desktop: started process {}", p.id),
+            Err(e) => error!("desktop: cannot start: {e}"),
+        },
+        Err(e) => warn!("desktop: {PATH} not available ({})", e.message()),
     }
 }
 

@@ -91,13 +91,24 @@ QEMU + OVMF from apt):
    QEMU's QMP `send-key`) and requires the VM to power itself off through
    ACPI, which exercises the keyboard driver, I/O APIC routing, the shell and
    ACPI S5 end to end
+6. desktop walk-through: `mbuild.py ui --expect-poweroff` boots the desktop
+   and drives it through QMP with the absolute (vmmouse) pointer and the
+   PS/2 keyboard: opens the Start menu, searches, launches Task Manager and
+   its Performance tab, opens the welcome file from a desktop icon, browses
+   `C:\` in File Explorer, runs `dir` in the Terminal, closes it with
+   Alt+F4, switches Settings to light mode, maximises a window and finally
+   clicks Start > Power > Shut down, which must power the VM off. A
+   screenshot of each step goes to `build/ui/`, and the run fails if the
+   kernel log reports a crash
 
-Logs, the screenshot and the disk image are uploaded as workflow artifacts.
+Logs, screenshots and the disk image are uploaded as workflow artifacts.
 
 ## Manual checks
 
 * `python tools/mbuild.py exec <command> ... [--screenshot]` automates most of
-  these.
+  these (it boots with `nodesktop`, so the keys reach the kernel shell).
+* `python tools/mbuild.py ui "click X Y" "type TEXT" "key alt+f4" "shot NAME" ...`
+  drives the desktop with any sequence of mouse and keyboard actions.
 * `python tools/mbuild.py run` and try the shell commands (`help`, `cpu`,
   `mem map`, `acpi`, `pci`, `irq`, `uptime`, `crash`, `shutdown`).
 * `crash` must show the stop screen with a stack trace.

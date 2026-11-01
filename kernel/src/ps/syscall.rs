@@ -5,13 +5,50 @@
 use alloc::sync::Arc;
 use alloc::vec;
 
-use meridian_abi::{protection, service, status};
+use meridian_abi::{InputEvent, ProcessInfo, ThreadInfo, dir_record, power, protection, service, status};
 
 use crate::arch::x86_64::syscall::SyscallFrame;
+use crate::fs::FsError;
 use crate::ke::objects::Event;
 use crate::ke::sched::{self, WaitStatus};
 use crate::mm::user::{self, Protection, USER_LIMIT};
 use crate::ob::Object;
+
+const MAX_PATH: usize = 512;
+
+/// Reads a UTF-8 path argument from user memory.
+fn user_path(ptr: u64, len: u64) -> Result<alloc::string::String, i64> {
+    if len == 0 || len as usize > MAX_PATH {
+        return Err(status::INVALID_PARAMETER);
+    }
+    let mut buf = vec![0u8; len as usize];
+    user::copy_from_user(&mut buf, ptr).map_err(|_| status::ACCESS_VIOLATION)?;
+    alloc::string::String::from_utf8(buf).map_err(|_| status::INVALID_PARAMETER)
+}
+
+fn fs_status(e: FsError) -> i64 {
+    match e {
+        FsError::NotFound | FsError::NoSuchVolume => status::OBJECT_NAME_NOT_FOUND,
+        FsError::BadPath => status::INVALID_PARAMETER,
+        FsError::IsADirectory => status::FILE_IS_A_DIRECTORY,
+        FsError::NotADirectory => status::NOT_A_DIRECTORY,
+        FsError::Io(_) => status::DEVICE_NOT_READY,
+        FsError::NoMemory | FsError::TooLarge => status::NO_MEMORY,
+        FsError::NotRecognized | FsError::Unsupported | FsError::Corrupt => status::UNSUCCESSFUL,
+    }
+}
+
+/// Views a plain-old-data value as bytes for copying to user mode.
+fn bytes_of<T: Copy>(value: &T) -> &[u8] {
+    // SAFETY: only used with #[repr(C)] ABI structs without padding bytes
+    // that could leak kernel data (all fields are explicitly sized).
+    unsafe { core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>()) }
+}
+
+fn copy_name(dst: &mut [u8], name: &str) {
+    let n = name.len().min(dst.len());
+    dst[..n].copy_from_slice(&name.as_bytes()[..n]);
+}
 
 const MAX_DEBUG_PRINT: usize = 4096;
 const MAX_ALLOCATION: u64 = 1 << 30;
@@ -91,17 +128,20 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
                 e.set();
                 status::SUCCESS
             }
+            Some(_) => status::OBJECT_TYPE_MISMATCH,
             None => status::INVALID_HANDLE,
         },
         service::WAIT => {
             let object = process.handles.lock().get(a0);
             let timeout = if a1 == u64::MAX { None } else { Some(a1) };
-            match object {
-                Some(Object::Event(e)) => match e.wait(timeout) {
-                    WaitStatus::Signaled => status::SUCCESS,
-                    WaitStatus::Timeout => status::TIMEOUT,
-                },
-                None => status::INVALID_HANDLE,
+            let result = match object {
+                Some(Object::Event(e)) => e.wait(timeout),
+                Some(Object::Process(p)) => p.terminated.wait(timeout),
+                None => return status::INVALID_HANDLE,
+            };
+            match result {
+                WaitStatus::Signaled => status::SUCCESS,
+                WaitStatus::Timeout => status::TIMEOUT,
             }
         }
         service::CLOSE_HANDLE => {
@@ -137,6 +177,187 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
                 Err(_) => status::ACCESS_VIOLATION,
             }
         }
+        service::READ_INPUT => {
+            if !crate::drivers::input::capture(process.id) {
+                return status::ACCESS_DENIED;
+            }
+            let max = (a1 as usize).clamp(1, 64);
+            let timeout = if frame.rdx == u64::MAX { None } else { Some(frame.rdx) };
+            let mut events = vec![InputEvent::default(); max];
+            let n = crate::drivers::input::read(&mut events, timeout);
+            for (i, e) in events.iter().take(n).enumerate() {
+                if user::copy_to_user(a0 + (i * core::mem::size_of::<InputEvent>()) as u64, bytes_of(e)).is_err() {
+                    return status::ACCESS_VIOLATION;
+                }
+            }
+            n as i64
+        }
+        service::ACQUIRE_DISPLAY => match crate::drivers::display::acquire(process.id, &process.space) {
+            Ok((address, info)) => {
+                if user::copy_to_user(a0, bytes_of(&info)).is_err() {
+                    return status::ACCESS_VIOLATION;
+                }
+                crate::info!("display: owned by process {} ({})", process.id, process.name());
+                address as i64
+            }
+            Err(e) => {
+                crate::warn!("display: {} cannot have the display: {e}", process.name());
+                status::ACCESS_DENIED
+            }
+        },
+        service::LIST_DIRECTORY => {
+            let path = match user_path(a0, a1) {
+                Ok(p) => p,
+                Err(s) => return s,
+            };
+            let entries = match crate::fs::list(&path) {
+                Ok(e) => e,
+                Err(e) => return fs_status(e),
+            };
+            let mut out = alloc::vec::Vec::new();
+            for e in entries {
+                let mut flags = 0;
+                if e.is_dir {
+                    flags |= dir_record::DIRECTORY;
+                }
+                if e.hidden {
+                    flags |= dir_record::HIDDEN;
+                }
+                if e.read_only {
+                    flags |= dir_record::READ_ONLY;
+                }
+                out.extend_from_slice(&e.size.to_le_bytes());
+                out.extend_from_slice(&flags.to_le_bytes());
+                out.extend_from_slice(&(e.name.len() as u32).to_le_bytes());
+                out.extend_from_slice(e.name.as_bytes());
+                out.resize(out.len().next_multiple_of(8), 0);
+            }
+            if out.len() as u64 > frame.r10 {
+                return status::BUFFER_TOO_SMALL;
+            }
+            match user::copy_to_user(frame.rdx, &out) {
+                Ok(()) => out.len() as i64,
+                Err(_) => status::ACCESS_VIOLATION,
+            }
+        }
+        service::READ_FILE => {
+            let path = match user_path(a0, a1) {
+                Ok(p) => p,
+                Err(s) => return s,
+            };
+            match crate::fs::read_file(&path) {
+                Ok(data) if data.len() as u64 > frame.r10 => status::BUFFER_TOO_SMALL,
+                Ok(data) => match user::copy_to_user(frame.rdx, &data) {
+                    Ok(()) => data.len() as i64,
+                    Err(_) => status::ACCESS_VIOLATION,
+                },
+                Err(e) => fs_status(e),
+            }
+        }
+        service::FILE_SIZE => {
+            let path = match user_path(a0, a1) {
+                Ok(p) => p,
+                Err(s) => return s,
+            };
+            match crate::fs::metadata(&path) {
+                Ok(Some(e)) if !e.is_dir => e.size as i64,
+                Ok(_) => status::FILE_IS_A_DIRECTORY,
+                Err(e) => fs_status(e),
+            }
+        }
+        service::CREATE_PROCESS => {
+            let path = match user_path(a0, a1) {
+                Ok(p) => p,
+                Err(s) => return s,
+            };
+            let image = match crate::fs::read_file(&path) {
+                Ok(data) => data,
+                Err(e) => return fs_status(e),
+            };
+            let name = path.rsplit(['\\', '/']).next().unwrap_or("program");
+            match crate::ps::process::spawn(name, &image, frame.rdx) {
+                Ok(child) => match process.handles.lock().insert(Object::Process(child)) {
+                    Some(h) => h as i64,
+                    None => status::NO_MEMORY,
+                },
+                Err(e) => {
+                    crate::warn!("{} could not start {path}: {e}", process.name());
+                    status::INVALID_IMAGE_FORMAT
+                }
+            }
+        }
+        service::PROCESS_STATUS => match process.handles.lock().get(a0) {
+            Some(Object::Process(p)) => p.exit_status().unwrap_or(status::STILL_ACTIVE),
+            Some(_) => status::OBJECT_TYPE_MISMATCH,
+            None => status::INVALID_HANDLE,
+        },
+        service::QUERY_THREADS => {
+            let max = a1 as usize / core::mem::size_of::<ThreadInfo>();
+            let mut written = 0usize;
+            for t in sched::threads().into_iter().take(max) {
+                let mut info = ThreadInfo {
+                    id: t.id,
+                    cpu_ms: t.cpu_ticks.load(core::sync::atomic::Ordering::Relaxed),
+                    priority: t.priority() as u32,
+                    state: t.state() as u32,
+                    cpu: t.last_cpu(),
+                    process: t.process().map_or(0, |p| p.id as u32),
+                    name: [0; 24],
+                };
+                copy_name(&mut info.name, t.name());
+                let at = a0 + (written * core::mem::size_of::<ThreadInfo>()) as u64;
+                if user::copy_to_user(at, bytes_of(&info)).is_err() {
+                    return status::ACCESS_VIOLATION;
+                }
+                written += 1;
+            }
+            written as i64
+        }
+        service::QUERY_PROCESSES => {
+            let max = a1 as usize / core::mem::size_of::<ProcessInfo>();
+            let mut written = 0usize;
+            for p in crate::ps::process::list().into_iter().take(max) {
+                let mut info = ProcessInfo {
+                    id: p.id,
+                    committed: p.space.committed(),
+                    exit_status: p.exit_status().unwrap_or(status::STILL_ACTIVE),
+                    handles: p.handles.lock().open_count() as u32,
+                    running: p.exit_status().is_none() as u32,
+                    name: [0; 32],
+                };
+                copy_name(&mut info.name, p.name());
+                let at = a0 + (written * core::mem::size_of::<ProcessInfo>()) as u64;
+                if user::copy_to_user(at, bytes_of(&info)).is_err() {
+                    return status::ACCESS_VIOLATION;
+                }
+                written += 1;
+            }
+            written as i64
+        }
+        service::QUERY_TIME => {
+            let now = crate::hal::rtc::now();
+            match user::copy_to_user(a0, bytes_of(&now)) {
+                Ok(()) => status::SUCCESS,
+                Err(_) => status::ACCESS_VIOLATION,
+            }
+        }
+        service::POWER => match a0 {
+            power::SHUT_DOWN => {
+                crate::info!("power: shutdown requested by {} ({})", process.name(), process.id);
+                match crate::hal::power::shutdown() {
+                    Ok(()) => status::SUCCESS,
+                    Err(e) => {
+                        crate::warn!("power: shutdown failed: {e}");
+                        status::UNSUCCESSFUL
+                    }
+                }
+            }
+            power::RESTART => {
+                crate::info!("power: restart requested by {} ({})", process.name(), process.id);
+                crate::hal::power::reboot()
+            }
+            _ => status::INVALID_PARAMETER,
+        },
         _ => status::INVALID_SYSTEM_SERVICE,
     }
 }

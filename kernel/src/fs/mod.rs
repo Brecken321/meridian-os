@@ -122,6 +122,12 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, FsError> {
     volume.fs.read_file(rest)
 }
 
+/// The directory entry for `path` (`None` for a volume's root directory).
+pub fn metadata(path: &str) -> Result<Option<DirEntry>, FsError> {
+    let (volume, rest) = resolve(path)?;
+    volume.fs.lookup(rest)
+}
+
 pub fn list(path: &str) -> Result<Vec<DirEntry>, FsError> {
     let (volume, rest) = resolve(path)?;
     volume.fs.list(rest)

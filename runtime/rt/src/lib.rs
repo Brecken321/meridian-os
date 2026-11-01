@@ -8,6 +8,11 @@
 
 #![no_std]
 
+extern crate alloc;
+
+mod heap;
+pub mod sys;
+
 use core::arch::{asm, global_asm};
 
 pub use meridian_abi::{SystemInfo, protection, service, status};
@@ -72,6 +77,18 @@ memset:
     mov rax, r9
     ret
 
+.global strlen
+strlen:
+    mov rax, rcx
+2:
+    cmp byte ptr [rax], 0
+    je 3f
+    inc rax
+    jmp 2b
+3:
+    sub rax, rcx
+    ret
+
 .global memcmp
 memcmp:
     xor eax, eax
@@ -87,6 +104,30 @@ memcmp:
     dec r8
     jnz 2b
 3:
+    ret
+
+// Stack probe the compiler calls before allocating a frame larger than a
+// page: touches each page from the caller's stack pointer down to the new
+// one, in order, so a guard page is always hit first. RAX holds the frame
+// size; the caller adjusts RSP itself.
+.global __chkstk
+__chkstk:
+    push rcx
+    push rax
+    cmp rax, 0x1000
+    lea rcx, [rsp + 24]
+    jb 3f
+2:
+    sub rcx, 0x1000
+    test [rcx], rcx
+    sub rax, 0x1000
+    cmp rax, 0x1000
+    ja 2b
+3:
+    sub rcx, rax
+    test [rcx], rcx
+    pop rax
+    pop rcx
     ret
 "#
 );
@@ -193,7 +234,7 @@ pub fn free_memory(address: *mut u8, size: usize) -> Result<(), i64> {
 }
 
 /// A kernel object handle, closed on drop.
-pub struct Handle(u64);
+pub struct Handle(pub(crate) u64);
 
 impl Handle {
     pub fn raw(&self) -> u64 {

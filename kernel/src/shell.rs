@@ -135,6 +135,18 @@ fn cmd_ver(_: &str) {
         None => kprintln!("  display:      none (serial console only)"),
     }
     kprintln!("  keyboard:     {}", if ps2::present() { "PS/2" } else { "none detected (serial input only)" });
+    let mouse = if !ps2::mouse_present() {
+        "none detected"
+    } else if ps2::mouse_absolute() {
+        "PS/2, absolute (vmmouse)"
+    } else {
+        "PS/2"
+    };
+    kprintln!("  mouse:        {mouse}");
+    match crate::drivers::display::owner() {
+        0 => kprintln!("  screen:       kernel console"),
+        pid => kprintln!("  screen:       owned by process {pid} (the desktop)"),
+    }
 }
 
 fn cmd_cpu(_: &str) {

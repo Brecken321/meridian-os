@@ -10,9 +10,9 @@ telemetry.
 It is **not** a Linux distribution, not a Windows derivative and not a themed
 desktop on top of another OS. Every line of the kernel is original.
 
-![Meridian kernel boot screen in QEMU](docs/images/boot-screen.png)
+![The Meridian desktop in QEMU: File Explorer and Terminal](docs/images/desktop.png)
 
-## Status: early kernel (pre-alpha)
+## Status: early kernel and first desktop (pre-alpha)
 
 Meridian is at the very beginning of a long road. What exists today, all
 tested on every commit in QEMU with UEFI firmware:
@@ -32,14 +32,20 @@ tested on every commit in QEMU with UEFI firmware:
 | Multiprocessor: all cores started, IPIs, TLB shootdown, multicore scheduling | ✅ working |
 | User mode: isolated processes, system calls, handles, PE32+ loader | ✅ working (first native program runs) |
 | Storage: AHCI SATA driver, GPT/MBR partitions, FAT32 with long names, drive letters (read-only) | ✅ working |
+| PS/2 mouse (absolute in VMs), real-time clock | ✅ working |
+| Desktop: windows, taskbar, Start menu with search, File Explorer, Terminal, Notepad, Task Manager, Settings | ✅ working (QEMU) |
 | Writable storage, NTFS, NVMe, USB | 🚧 next |
-| Win32 subsystem, desktop, networking, GPU… | 📋 planned |
+| Win32 subsystem, windows for other programs, networking, GPU… | 📋 planned |
 
-The first user-mode program (`init.exe`, a PE32+ executable built from
-`system/init`) is read from the boot disk and runs in ring 3 at every boot; a program that crashes is
-terminated without affecting the kernel. Nothing runs Windows applications
-yet (the Win32 subsystem does not exist), there is no desktop yet, and no real
-hardware has been tested yet. See [docs/STATUS.md](docs/STATUS.md) for the
+At every boot the kernel runs `init.exe` and then the desktop
+(`DESKTOP.EXE`), both PE32+ programs read from the boot disk and running in
+ring 3; a program that crashes is terminated without affecting the kernel.
+The desktop is real, not a mock-up: the File Explorer lists the actual disk,
+Task Manager shows the kernel's live threads and processor use, Settings
+changes the theme, and Start > Power shuts the machine down. Its apps are
+built into the desktop program for now. Nothing runs Windows applications
+yet (the Win32 subsystem does not exist), files cannot be saved (storage is
+read-only), and no real hardware has been tested yet. See [docs/STATUS.md](docs/STATUS.md) for the
 precise feature list, known bugs and test results, and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
 
@@ -52,28 +58,33 @@ winget install SoftwareFreedomConservancy.QEMU
 ```
 
 Then, on Windows, double-click **`run-meridian.cmd`** in the repository
-folder (or run it from a terminal). For a hands-off look, double-click
-**`demo-meridian.cmd`** instead: it opens the same window and types a guided
-tour into it, ending with the full self-test suite, then leaves the window
-open for you. Anywhere else, run:
+folder (or run it from a terminal): the Meridian desktop opens in a QEMU
+window after a few seconds, and you use it with your mouse and keyboard like
+any PC. **`demo-meridian.cmd`** instead opens the kernel's text shell and
+types a guided tour of the kernel into it. Anywhere else, run:
 
 ```bash
 python tools/mbuild.py run --release
 ```
 
 That builds the boot manager, kernel and user programs, writes a bootable
-GPT disk image to `build/meridian.img` and boots it in a QEMU window. Click
-inside the window to type. Build output stays small (about 15 MB in
-`target/` plus the 48 MB disk image) and `python tools/mbuild.py clean`
-removes all of it. The kernel shell accepts
-commands such as `help`, `dir C:\MERIDIAN`, `type "C:\Welcome to Meridian.txt"`,
-`run C:\MERIDIAN\INIT.EXE`, `threads`, `ps`, `cpu`, `mem`, `disks`, `vol`
-and `shutdown`.
+GPT disk image to `build/meridian.img` and boots it in a QEMU window. Build
+output stays small (under 20 MB in `target/` plus the 48 MB disk image) and
+`python tools/mbuild.py clean` removes all of it. The kernel's own text
+shell is still there: type its commands (`help`, `threads`, `cpu`, `mem`,
+`disks`, ...) in the terminal that started QEMU, or boot with
+`--cmdline nodesktop` to get it on screen.
 
-Run the automated kernel tests:
+Run the automated kernel tests, and the desktop walk-through that clicks
+and types through every app with QEMU's virtual mouse and keyboard
+(screenshots go to `build/ui/`):
 
 ```bash
 python tools/mbuild.py test
+```
+
+```bash
+python tools/mbuild.py ui
 ```
 
 Full instructions: [docs/BUILDING.md](docs/BUILDING.md) and

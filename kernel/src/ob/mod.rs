@@ -15,6 +15,7 @@ use crate::ke::objects::Event;
 #[derive(Clone)]
 pub enum Object {
     Event(Arc<Event>),
+    Process(Arc<crate::ps::process::Process>),
 }
 
 const MAX_HANDLES: usize = 16 * 1024;

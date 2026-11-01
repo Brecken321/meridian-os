@@ -75,6 +75,10 @@ impl Process {
         self.exit_status.store(code, Ordering::Relaxed);
         let objects = self.handles.lock().drain();
         drop(objects);
+        // Give the screen and keyboard back to the kernel console if this
+        // process had taken them.
+        crate::drivers::display::release(self.id);
+        crate::drivers::input::release(self.id);
         self.terminated.set();
     }
 }

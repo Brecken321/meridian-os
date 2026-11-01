@@ -388,7 +388,30 @@ pub fn init(info: &BootInfo) -> bool {
     true
 }
 
+static SUSPENDED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Stops drawing (a user-mode program owns the display).
+pub fn suspend() {
+    SUSPENDED.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Takes the screen back: repaints the header and clears the text area.
+pub fn resume() {
+    let mut guard = CONSOLE.lock_at(HIGH_LEVEL);
+    if let Some(con) = guard.as_mut() {
+        con.fb.fill(0, 0, con.fb.width, con.fb.height, con.default_bg);
+        draw_header(&con.fb);
+        con.fg = con.default_fg;
+        con.bg = con.default_bg;
+        con.clear_area();
+    }
+    SUSPENDED.store(false, core::sync::atomic::Ordering::Release);
+}
+
 pub fn write_bytes(bytes: &[u8]) {
+    if SUSPENDED.load(core::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     let mut guard = CONSOLE.lock_at(HIGH_LEVEL);
     if let Some(con) = guard.as_mut() {
         con.draw_cursor(false);

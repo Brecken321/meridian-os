@@ -19,6 +19,8 @@ pub mod vectors {
     pub const KEYBOARD: u8 = 0x81;
     /// COM1 serial port (IRQL 8).
     pub const SERIAL: u8 = 0x82;
+    /// PS/2 mouse (IRQL 8).
+    pub const MOUSE: u8 = 0x83;
     /// Local APIC timer (CLOCK_LEVEL).
     pub const CLOCK: u8 = 0xD1;
     /// Generic inter-processor interrupt (IPI_LEVEL).

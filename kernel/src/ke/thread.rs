@@ -83,6 +83,23 @@ pub struct Thread {
     pub terminated: Event,
     /// The process a user-mode thread belongs to (`None` for kernel threads).
     process: Option<Arc<Process>>,
+    /// Saved x87/SSE registers of a user thread (kernel code never uses
+    /// them, so kernel threads have none).
+    fpu: Option<Box<UnsafeCell<FpuState>>>,
+}
+
+/// FXSAVE image.
+#[repr(C, align(16))]
+pub(super) struct FpuState([u8; 512]);
+
+impl FpuState {
+    /// Power-on defaults: all exceptions masked (FCW 0x037F, MXCSR 0x1F80).
+    fn initial() -> Self {
+        let mut s = [0u8; 512];
+        s[0..2].copy_from_slice(&0x037Fu16.to_le_bytes());
+        s[24..28].copy_from_slice(&0x1F80u32.to_le_bytes());
+        Self(s)
+    }
 }
 
 // SAFETY: interior-mutable fields are either atomics or only accessed with
@@ -116,8 +133,14 @@ impl Thread {
             cpu_ticks: AtomicU64::new(0),
             last_cpu: AtomicU32::new(0),
             terminated: Event::new(true, false),
+            fpu: process.as_ref().map(|_| Box::new(UnsafeCell::new(FpuState::initial()))),
             process,
         }
+    }
+
+    /// The thread's FXSAVE area, if it is a user thread.
+    pub(super) fn fpu_area(&self) -> Option<*mut u8> {
+        self.fpu.as_ref().map(|f| f.get() as *mut u8)
     }
 
     pub fn process(&self) -> Option<Arc<Process>> {

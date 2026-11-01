@@ -9,7 +9,8 @@ before starting; update both when a milestone moves.
 - Build image: `python tools/mbuild.py build`
 - Self tests in QEMU (must pass before committing): `python tools/mbuild.py test`
 - Also check the release build: `python tools/mbuild.py test --release`
-- Boot screenshot: `python tools/mbuild.py screenshot` → `build/screenshot.png`
+- Boot screenshot: `python tools/mbuild.py screenshot` → `build/screenshot.png` (waits for "desktop: ready")
+- Desktop walk-through: `python tools/mbuild.py ui` (default steps in `UI_STEPS`, screenshots in `build/ui/`); custom: `ui "click X Y" "type ..." "shot NAME"`
 - Interactive: `python tools/mbuild.py run` (QEMU window + serial shell)
 - Format: `cargo fmt --all` (CI enforces `cargo fmt --check`)
 
@@ -27,10 +28,12 @@ before starting; update both when a milestone moves.
 - Storage is read-only by design (no write path exists); AHCI in `drivers/ahci.rs`, FAT32 in `fs/fat.rs`
 - `run-meridian.cmd` is the one-click way for the user to try a release build; `demo-meridian.cmd` / `mbuild.py demo` types a guided tour into a visible window (steps in `DEMO_STEPS`)
 - Don't rebuild while the user has a Meridian window open: `build/meridian.img` is in use by that VM
-- `shared/abi/` syscall numbers + NTSTATUS; `runtime/rt/` native user runtime; `system/init/` first program
+- `shared/abi/` syscall numbers + NTSTATUS; `runtime/rt/` native user runtime (has a heap: `alloc` works); `system/init/` first program
+- `system/desktop/` the desktop (user mode, Rust): `main.rs` window manager/taskbar/Start, `apps.rs` built-in apps, `gfx.rs`, `font.rs` (TrueType), `ui.rs`; started by the kernel from `C:\MERIDIAN\DESKTOP.EXE` unless `nodesktop`
+- `exec`/`demo` boot with `nodesktop` (they type into the kernel shell)
 - User programs: PE32+ via `cargo rustc --target x86_64-pc-windows-msvc` + rust-lld (see `USER_PROGRAMS` in mbuild.py)
 - `tools/mbuild.py` build/run/test/screenshot; writes GPT+FAT32 image itself
-- Languages: Rust (kernel/services), C (Win32 DLLs, later), C++ (desktop/COM, later)
+- Languages: Rust (kernel/services/desktop), C (Win32 DLLs, later), C++ (COM/DirectX layers, later)
 
 ## Conventions
 

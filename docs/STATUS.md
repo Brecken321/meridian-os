@@ -20,8 +20,11 @@ the self tests or was verified manually in QEMU as noted.
 * Time: HPET (PIT fallback, untested) calibration of TSC and APIC timer;
   1 kHz clock.
 * PCI enumeration (legacy configuration mechanism).
-* PS/2 keyboard (US layout), COM1 serial console, framebuffer console with
+* PS/2 keyboard (US layout) and PS/2 mouse, with VMware's absolute-pointer
+  ("vmmouse") protocol when the hypervisor offers it, so the mouse is never
+  captured by the QEMU window; COM1 serial console; framebuffer console with
   ANSI colours.
+* Real-time clock (CMOS RTC) for the date and time.
 * Kernel threads with guard-paged stacks; 32-level priority scheduler with
   O(1) selection, 10 ms time slices, immediate preemption by higher-priority
   threads through the DISPATCH software interrupt; idle thread; thread exit
@@ -37,11 +40,30 @@ the self tests or was verified manually in QEMU as noted.
 * Interrupt-driven console input: PS/2 keyboard and COM1 receive interrupts
   wake the shell thread through a DPC and an event.
 * User mode: per-process address spaces (private lower half, shared kernel
-  half), ring-3 threads, SYSCALL/SYSRET system call entry with 15 services
+  half), ring-3 threads, SYSCALL/SYSRET system call entry with 26 services
   (debug output, exit, yield, sleep, ids, memory allocate/free, events, wait,
-  close handle, uptime, system information), per-process handle tables, argument validation with
-  fault-safe user copies, CPU exceptions in user mode terminate only the
-  process (with NTSTATUS codes), complete teardown of process memory.
+  close handle, uptime, system information, keyboard/mouse input, display
+  ownership, list directory, read file, file size, create process, process
+  status, thread and process lists, wall-clock time, shut down/restart),
+  per-process handle tables, argument validation with fault-safe user copies,
+  CPU exceptions in user mode terminate only the process (with NTSTATUS
+  codes), complete teardown of process memory. User threads keep their own
+  SSE/x87 state (FXSAVE/FXRSTOR on every switch).
+* Desktop (`system/desktop`, a user-mode PE32+ program started at boot from
+  `C:\MERIDIAN\DESKTOP.EXE`): it takes over the screen, keyboard and mouse
+  and draws everything itself (software compositor with damage tracking,
+  TrueType text, rounded corners and shadows). Working: window manager
+  (focus, z-order, drag, minimise/maximise/close, double-click title to
+  maximise, Alt+Tab, Alt+F4), taskbar with pinned and running apps and a
+  live clock, Start menu with search, pinned apps, recommended files from
+  the disk and Shut down/Restart, desktop icons, mouse wheel scrolling. Apps:
+  File Explorer (drives, folders, opening text files and programs), Terminal
+  (dir, cd, type, run, ps, threads, mem, date, ...), Notepad (opens text
+  files; edits stay in memory because storage is read-only), Task Manager
+  (processes, live CPU graph and memory, kernel threads), Settings (light/dark
+  mode, accent colour, wallpaper, taskbar alignment; not saved across
+  restarts) and About. Verified by the `ui` walk-through in CI. When the
+  desktop exits, the kernel console takes the screen back.
 * PE32+ loader: header validation, section mapping with per-section
   protections, DIR64 base relocations (images are loaded 256 MiB above their
   preferred base, so relocation is always exercised), stack sizing.
@@ -55,16 +77,18 @@ the self tests or was verified manually in QEMU as noted.
 * Kernel shell: help, ver, cpu, mem, acpi, pci, irq, threads, ps, run, disks,
   vol, dir, type, uptime, log, clear, selftest, reboot, shutdown, crash.
 * Build: reproducible GPT/FAT32 image writer, QEMU runner, self-test harness,
-  screenshot capture, GitHub Actions CI. All crates build without compiler
-  warnings. `run-meridian.cmd` builds a release image and opens it in QEMU
-  with short instructions.
+  screenshot capture, scripted desktop walk-through (`mbuild.py ui`, mouse
+  and keyboard through QMP), GitHub Actions CI. All crates build without
+  compiler warnings. `run-meridian.cmd` builds a release image and opens the
+  desktop in QEMU with short instructions.
 
 ## Not implemented yet
 
-Multi-threaded user processes, process creation from user mode, object
-namespace and access checks, PE imports/TLS, writing to disks, NVMe,
-NTFS, file access from user mode, any filesystem, USB, networking, audio, GPU acceleration,
-desktop, Windows compatibility, installer. See [ROADMAP.md](ROADMAP.md).
+Multi-threaded user processes, object namespace and access checks, PE
+imports/TLS, writing to disks, NVMe, NTFS, USB, networking, audio, GPU
+acceleration, Windows compatibility (Win32), windows for programs other than
+the built-in apps, saving settings, user accounts, installer. See
+[ROADMAP.md](ROADMAP.md).
 
 ## Known limitations
 
@@ -73,8 +97,14 @@ desktop, Windows compatibility, installer. See [ROADMAP.md](ROADMAP.md).
   queues are planned.
 * No thread affinity, wait-for-multiple-objects, APCs or priority boosting yet.
 * User processes have exactly one thread; all user memory is committed up
-  front (no demand paging); programs must not import DLLs; user programs
-  cannot open files yet (only the kernel reads the disk).
+  front (no demand paging); programs must not import DLLs; user programs can
+  read files and list folders but not open handles to them.
+* The desktop's apps are built into the desktop program itself; other
+  programs cannot open windows yet (that needs a window-system protocol
+  between processes). Everything is drawn by the CPU; there is no GPU
+  driver.
+* Without the vmmouse protocol (real hardware, or `novmmouse`), the PS/2
+  mouse is relative and has no wheel.
 * Storage is read-only and polled (no AHCI interrupts or command queuing);
   only FAT32 is recognised, so the EFI system partition becomes `C:`;
   optical drives are skipped.
@@ -115,8 +145,9 @@ None open. Fixed during bring-up (2026-10-31):
 
 ## Failed tests
 
-None. Latest local runs: 48/48 passed (repeated debug and release runs,
-4 vCPUs).
+None. Latest local runs: 48/48 self tests passed (debug and release,
+4 vCPUs); the desktop walk-through (`mbuild.py ui`, 11 steps ending in
+Start > Shut down) passed in debug and release.
 
 ## Real hardware tested
 

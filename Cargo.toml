@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["boot", "kernel", "runtime/rt", "shared/abi", "shared/bootinfo", "system/init"]
+members = ["boot", "kernel", "runtime/rt", "shared/abi", "shared/bootinfo", "system/desktop", "system/init"]
 
 [workspace.package]
 version = "0.1.0"

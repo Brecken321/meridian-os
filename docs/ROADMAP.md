@@ -39,7 +39,8 @@ Update this file whenever a milestone moves.
 * ✅ Storage: AHCI SATA (read-only, polled); ⬜ NVMe, virtio-blk, writes
 * ✅ Partitions: GPT and MBR primary entries
 * ✅ Volumes with drive letters; FAT32 read-only with long file names; ⬜ FAT write, FAT12/16, exFAT; NTFS read-only first
-* ⬜ USB: xHCI, HID keyboard/mouse; PS/2 mouse
+* ✅ PS/2 mouse (absolute "vmmouse" mode under hypervisors); CMOS real-time clock
+* ⬜ USB: xHCI, HID keyboard/mouse
 * ⬜ ACPI AML interpreter (evaluate a vetted existing implementation vs. own)
 
 ## Phase 5 — User mode ⬜
@@ -47,17 +48,17 @@ Update this file whenever a milestone moves.
 * ✅ PE32+ loader (sections, protections, base relocations); ⬜ imports, TLS, exception tables
 * ✅ Native runtime (`runtime/rt`) + first user program (`system/init`); ⬜ session manager; service manager
 * ✅ Process isolation tests; a crashing user process never stops the kernel
-* ⬜ User-mode thread creation, multi-threaded processes, process creation from user mode
+* ✅ Process creation from user mode; file reading, directory listing, process/thread queries, wall-clock time and power from user mode
+* ⬜ User-mode thread creation, multi-threaded processes
 * ⬜ User-mode driver host prototype
 
-## Phase 6 — Graphics and desktop ⬜
+## Phase 6 — Graphics and desktop 🚧
 
-* ⬜ Display driver interface; GOP framebuffer driver; virtio-gpu
-* ⬜ Compositor + window manager; input routing
-* ⬜ UI toolkit (C++); fonts (open fonts, e.g. Inter/Noto); theming
-* ⬜ Desktop shell: taskbar, Start menu, tray, notifications, snapping,
-  virtual desktops, Alt+Tab, lock/login screens
-* ⬜ File Explorer, Settings (every control wired to real functionality)
+* ✅ GOP framebuffer handed to a user-mode program (display ownership, input capture); ⬜ display driver interface; virtio-gpu
+* ✅ Software compositor (damage tracking, shadows, rounded corners) + window manager inside the desktop process; ⬜ window-system protocol so other processes can open windows
+* ✅ TrueType rasterizer and UI drawing in Rust (Selawik font, OFL); light/dark themes, accent colours, wallpapers; ⬜ shared UI toolkit library for other programs; ⬜ saving settings
+* ✅ Desktop shell: taskbar, Start menu with search, Alt+Tab, Alt+F4, desktop icons, power menu; ⬜ tray, notifications, snapping, resizing by the window edges, virtual desktops, lock/login screens
+* ✅ File Explorer, Terminal, Notepad, Task Manager, Settings, About (every control wired to real functionality); ⬜ saving files (needs writable storage)
 
 ## Phase 7 — Windows compatibility ⬜
 
@@ -96,10 +97,14 @@ Update this file whenever a milestone moves.
 
 ## Next session starts here
 
-1. User-mode thread creation and multi-threaded process termination; process
-   creation from user mode (so init can start other programs).
-2. PE imports (a native `msys.dll` loaded from `C:\MERIDIAN`), which is
+1. Desktop polish: resize windows by their edges, window snapping, keyboard
+   focus inside apps (Tab), a scroll bar in Explorer and Notepad.
+2. A window-system protocol (shared-memory surfaces + an event channel) so
+   programs other than the built-in apps can open windows; then move the
+   UI drawing code into a shared library.
+3. User-mode thread creation and multi-threaded process termination.
+4. PE imports (a native `msys.dll` loaded from `C:\MERIDIAN`), which is
    also the first step towards loading Win32 DLLs.
-3. File system system calls (open/read/directory listing) so user programs
-   can use storage; then MSI interrupts for AHCI, an NVMe driver and USB
-   (xHCI + mass storage) to reach real hardware.
+5. Writable storage (FAT32 writes on a separate test disk image first) so
+   Notepad and Settings can save; then MSI interrupts for AHCI, NVMe and USB
+   (xHCI + HID + mass storage) to reach real hardware.

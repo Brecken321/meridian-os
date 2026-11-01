@@ -18,6 +18,13 @@ name = "meridian-bootinfo"
 version = "0.1.0"
 
 [[package]]
+name = "meridian-desktop"
+version = "0.1.0"
+dependencies = [
+ "meridian-rt",
+]
+
+[[package]]
 name = "meridian-init"
 version = "0.1.0"
 dependencies = [

@@ -46,6 +46,9 @@ impl Protection {
 #[derive(Clone, Copy, Debug)]
 struct Region {
     pages: u64,
+    /// False for device memory (e.g. the framebuffer): the frames are not
+    /// freed when the region goes away.
+    owned: bool,
 }
 
 pub struct AddressSpace {
@@ -106,7 +109,7 @@ impl AddressSpace {
                 return Err(VmError::OutOfMemory);
             }
         }
-        regions.insert(base, Region { pages });
+        regions.insert(base, Region { pages, owned: true });
         Ok(())
     }
 
@@ -133,7 +136,7 @@ impl AddressSpace {
     pub fn free(&self, base: u64, size: u64) -> Result<(), VmError> {
         let mut regions = self.regions.lock();
         let region = *regions.get(&base).ok_or(VmError::NotFound)?;
-        if size.div_ceil(PAGE_SIZE).max(1) != region.pages {
+        if !region.owned || size.div_ceil(PAGE_SIZE).max(1) != region.pages {
             return Err(VmError::BadAddress);
         }
         regions.remove(&base);
@@ -205,9 +208,33 @@ impl AddressSpace {
         }
     }
 
+    /// Maps `pages` pages of device memory starting at physical `phys` at
+    /// `base`. The frames stay owned by the device.
+    pub fn map_device(&self, base: u64, phys: u64, pages: u64, protection: Protection) -> Result<(), VmError> {
+        let end = Self::check_range(base, pages)?;
+        let mut regions = self.regions.lock();
+        if regions.range(..end).next_back().is_some_and(|(&b, r)| b + r.pages * PAGE_SIZE > base) {
+            return Err(VmError::Overlap);
+        }
+        for i in 0..pages {
+            // SAFETY: `base` is a free user range; `phys` is device memory.
+            if unsafe { paging::map(self.pml4, base + i * PAGE_SIZE, phys + i * PAGE_SIZE, protection.pte_flags()) }
+                .is_err()
+            {
+                for j in 0..i {
+                    // SAFETY: undoing the mappings made above.
+                    unsafe { paging::unmap(self.pml4, base + j * PAGE_SIZE) };
+                }
+                return Err(VmError::OutOfMemory);
+            }
+        }
+        regions.insert(base, Region { pages, owned: false });
+        Ok(())
+    }
+
     /// Total committed bytes.
     pub fn committed(&self) -> u64 {
-        self.regions.lock().values().map(|r| r.pages * PAGE_SIZE).sum()
+        self.regions.lock().values().filter(|r| r.owned).map(|r| r.pages * PAGE_SIZE).sum()
     }
 }
 
@@ -220,7 +247,9 @@ impl Drop for AddressSpace {
             for i in 0..region.pages {
                 // SAFETY: as above.
                 if let Some(frame) = unsafe { paging::unmap(self.pml4, base + i * PAGE_SIZE) } {
-                    pmm::free_frame(frame);
+                    if region.owned {
+                        pmm::free_frame(frame);
+                    }
                 }
             }
         }

@@ -311,6 +311,17 @@ unsafe fn switch_locked(st: &mut State) {
     pcr.previous_thread.store(cur, Ordering::Relaxed);
     pcr.current_thread.store(next_raw as *mut Thread, Ordering::Relaxed);
     CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    // User threads own the x87/SSE registers; save the outgoing thread's
+    // and load the incoming one's (kernel code never touches them).
+    // SAFETY: each FXSAVE area is only used by its thread's processor.
+    unsafe {
+        if let Some(area) = (*cur).fpu_area() {
+            cpu::fxsave(area);
+        }
+        if let Some(area) = (*next_raw).fpu_area() {
+            cpu::fxrstor(area);
+        }
+    }
     // SAFETY: `cur` stays alive until `finish_switch` on the other side drops
     // the reference handed over through `previous_thread`.
     unsafe { context::switch((*cur).context.get(), load) };

@@ -5,7 +5,8 @@
   python tools/mbuild.py run          build, then boot in a QEMU window (serial log in this terminal)
   python tools/mbuild.py test         build, boot headless with `selftest`, report results (used by CI)
   python tools/mbuild.py screenshot   build, boot headless, save the screen to build/screenshot.png
-  python tools/mbuild.py demo         open Meridian in a window and type a guided tour into it
+  python tools/mbuild.py ui           boot the desktop headless, click and type through it, save screenshots
+  python tools/mbuild.py demo         open Meridian's text shell in a window and type a guided tour into it
   python tools/mbuild.py clean        delete build outputs
 
 Common options: --release, --smp N, --memory 512M, --cmdline "extra options".
@@ -45,6 +46,7 @@ PART_GUID = uuid.uuid5(uuid.NAMESPACE_URL, "https://github.com/Brecken321/meridi
 QEMU_EXIT_SUCCESS = (0x10 << 1) | 1
 QEMU_EXIT_FAILURE = (0x11 << 1) | 1
 BOOT_MARKER = "boot: kernel initialised"
+DESKTOP_MARKER = "desktop: ready"
 
 
 # --------------------------------------------------------------------------
@@ -54,7 +56,7 @@ BOOT_MARKER = "boot: kernel initialised"
 # Native Meridian programs are PE32+ images built with the MSVC-ABI target
 # and linked by Rust's bundled lld (no Microsoft tools or libraries).
 USER_TARGET = "x86_64-pc-windows-msvc"
-USER_PROGRAMS = [("meridian-init", "init", "INIT.EXE")]
+USER_PROGRAMS = [("meridian-init", "init", "INIT.EXE"), ("meridian-desktop", "desktop", "DESKTOP.EXE")]
 USER_LINK_FLAGS = [
     "-C", "linker=rust-lld", "-C", "linker-flavor=lld-link",
     "-C", "link-arg=-nodefaultlib", "-C", "link-arg=-entry:meridian_start",
@@ -310,13 +312,18 @@ disk driver, GPT partition reader and FAT32 file system (with long file
 names), all written from scratch for this kernel. Storage is read-only for
 now, so nothing here can change a disk.
 
-Things to try in this shell:
-  dir C:\\MERIDIAN           list the system folder
-  run C:\\MERIDIAN\\INIT.EXE  run a program from disk in user mode
-  run init 1                watch a crashing program get stopped safely
-  threads, ps, cpu, mem     look inside the kernel
-  disks, vol                storage devices and drive letters
-  shutdown                  power off
+Things to try on the desktop:
+  - Open Start (the taskbar button or the Windows key) and type to search.
+  - File Explorer: browse C:\\ and open files and programs.
+  - Terminal: dir, type, ps, threads, mem, run C:\\MERIDIAN\\INIT.EXE
+  - Task Manager: live processes, kernel threads and processor use.
+  - Settings: dark or light mode, accent colour, wallpaper, taskbar alignment.
+  - Drag a window by its title bar; double-click the title bar to maximise.
+  - Alt+Tab switches windows, Alt+F4 closes one.
+  - Start > Power shuts Meridian down or restarts it.
+
+In the kernel's text shell (boot with "nodesktop", or type in the serial
+console), "help" lists the kernel commands: threads, cpu, mem, disks, vol...
 
 Meridian is early, honest work in progress: see docs/STATUS.md.
 """
@@ -385,12 +392,13 @@ def qemu_command(args, headless: bool, extra: list[str]) -> list[str]:
         "-drive", "if=pflash,format=raw,unit=1,file=ovmf-vars.fd",
         "-drive", "format=raw,file=meridian.img",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-        "-no-reboot",
+        "-rtc", "base=localtime",
     ]
     if args.accel:
         cmd += ["-accel", args.accel]
     if headless:
-        cmd += ["-display", "none", "-monitor", "none"]
+        # Automated runs stop instead of rebooting, so a crash cannot loop.
+        cmd += ["-display", "none", "-monitor", "none", "-no-reboot"]
     return cmd + extra
 
 
@@ -405,12 +413,12 @@ def cmd_build(args) -> int:
 
 
 RUN_HELP = """
-Meridian OS is starting in a QEMU window.
-  * Click inside the window to type into the Meridian shell.
-  * Press Ctrl+Alt+G to release the mouse from the window.
-  * Try: help   type "C:\\Welcome to Meridian.txt"   dir C:\\MERIDIAN   threads   shutdown
-  * The kernel log also appears below, and you can type commands here too.
-  * Close the QEMU window (or type shutdown) to stop.
+Meridian OS is starting in a QEMU window; the desktop appears in a few seconds.
+  * Use the mouse and keyboard in that window as on any PC: the Start button,
+    File Explorer, Terminal, Task Manager, Settings and Notepad all work.
+  * If the window ever captures the mouse, press Ctrl+Alt+G to release it.
+  * The kernel log appears below, and you can type kernel shell commands here.
+  * Start > Power > Shut down (or closing the window) stops Meridian.
 """
 
 
@@ -497,10 +505,11 @@ def cmd_screenshot(args) -> int:
                        extra=["-serial", f"file:{log.name}", "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off"])
     print("+", " ".join(cmd), flush=True)
     proc = subprocess.Popen(cmd, cwd=BUILD)
+    marker = BOOT_MARKER if "nodesktop" in args.cmdline.split() else DESKTOP_MARKER
     try:
-        if wait_for_log(log, proc, [BOOT_MARKER], args.timeout) is None:
+        if wait_for_log(log, proc, [marker], args.timeout) is None:
             print(log.read_text(errors="replace") if log.exists() else "(no serial output)")
-            print("error: the kernel did not finish booting")
+            print(f"error: never saw \"{marker}\" on the serial log")
             return 1
         time.sleep(args.settle)
         out = Path(args.out).resolve()
@@ -535,11 +544,154 @@ def key_events(text: str) -> list[dict]:
     return commands
 
 
+# The desktop walk-through `ui` runs when given no actions (also used by CI).
+# Coordinates are for the default 1280x800 screen.
+UI_STEPS = [
+    "shot desktop",
+    "click 520 776", "wait 0.5", "shot start-menu",
+    "type task", "wait 0.3", "shot start-search",
+    "key ret", "wait 1.5", "shot task-manager",
+    "click 337 115", "wait 3", "shot performance",
+    "dclick 56 158", "wait 1", "shot welcome-file",
+    "click 568 776", "wait 1", "click 262 254", "wait 1", "shot explorer",
+    "key meta_l", "wait 0.5", "key esc", "wait 0.3",
+    "click 616 776", "wait 1", r"type dir C:\\MERIDIAN\n", "wait 1", "shot terminal",
+    "key alt+f4", "wait 0.5",
+    "click 712 776", "wait 1", "click 879 290", "wait 1.5", "shot light-mode",
+    "dclick 538 171", "wait 1", "shot maximized",
+    "click 520 776", "wait 0.5", "click 900 704", "wait 0.5", "shot power-menu",
+    "click 830 608", "wait 3",
+]
+
+
+def unescape(text: str) -> str:
+    """`ui` type text: \\n is Enter and \\\\ a backslash; other backslashes stay."""
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\\" and text[i + 1:i + 2] in ("n", "\\"):
+            out.append("\n" if text[i + 1] == "n" else "\\")
+            i += 2
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def qemu_abs(x: int, y: int, width: int, height: int) -> list[dict]:
+    """Absolute pointer position for QMP (0..0x7FFF on each axis)."""
+    return [{"type": "abs", "data": {"axis": "x", "value": -(-x * 0x8000 // width)}},
+            {"type": "abs", "data": {"axis": "y", "value": -(-y * 0x8000 // height)}}]
+
+
+def ui_commands(action: str, width: int, height: int) -> list[dict]:
+    """QMP commands for one `ui` action (see cmd_ui)."""
+    verb, _, rest = action.partition(" ")
+    nums = [int(v) for v in rest.split()] if verb in ("click", "dclick", "rclick", "move", "drag", "wheel") else []
+
+    def send(*events):
+        return {"execute": "input-send-event", "arguments": {"events": list(events)}}
+
+    def button(name, down):
+        return {"type": "btn", "data": {"down": down, "button": name}}
+
+    if verb == "move":
+        return [send(*qemu_abs(*nums, width, height))]
+    if verb in ("click", "dclick", "rclick"):
+        name = "right" if verb == "rclick" else "left"
+        clicks = 2 if verb == "dclick" else 1
+        return [send(*qemu_abs(*nums, width, height))] + [send(button(name, d)) for _ in range(clicks) for d in (True, False)]
+    if verb == "drag":
+        x1, y1, x2, y2 = nums
+        steps = [send(*qemu_abs(x1, y1, width, height)), send(button("left", True))]
+        for i in range(1, 9):
+            steps.append(send(*qemu_abs(x1 + (x2 - x1) * i // 8, y1 + (y2 - y1) * i // 8, width, height)))
+        return steps + [send(button("left", False))]
+    if verb == "wheel":
+        x, y, n = nums
+        name = "wheel-down" if n > 0 else "wheel-up"
+        return [send(*qemu_abs(x, y, width, height))] + [send(button(name, d)) for _ in range(abs(n)) for d in (True, False)]
+    if verb == "type":
+        return key_events(unescape(rest))
+    if verb == "key":
+        return [{"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": k} for k in rest.split("+")]}}]
+    raise ValueError(f"unknown ui action {action!r}")
+
+
+def cmd_ui(args) -> int:
+    """Boots the desktop headless and drives it with the virtual mouse and
+    keyboard, saving a screenshot at every `shot NAME` to build/ui/. Actions:
+    click X Y, dclick X Y, rclick X Y, move X Y, drag X1 Y1 X2 Y2,
+    wheel X Y N, type TEXT, key QCODE[+QCODE], wait SECONDS, shot NAME.
+    Fails if the desktop never starts or the kernel log reports a crash."""
+    prepare(args, f"{args.video} {args.cmdline}")
+    width, height = (int(v) for v in args.video.split("=")[1].split("x"))
+    log = BUILD / "serial-ui.log"
+    log.unlink(missing_ok=True)
+    shots = BUILD / "ui"
+    shots.mkdir(exist_ok=True)
+    for old in shots.glob("*.png"):
+        old.unlink()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    cmd = qemu_command(args, headless=True,
+                       extra=["-serial", f"file:{log.name}", "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off"])
+    show("+", " ".join(cmd))
+    proc = subprocess.Popen(cmd, cwd=BUILD)
+    count = 0
+    try:
+        if wait_for_log(log, proc, [DESKTOP_MARKER], args.timeout) is None:
+            print(log.read_text(errors="replace") if log.exists() else "(no serial output)")
+            print("error: the desktop did not start")
+            return 1
+        time.sleep(args.settle)
+        for action in args.commands or UI_STEPS:
+            if proc.poll() is not None:
+                break
+            verb, _, rest = action.partition(" ")
+            if verb == "wait":
+                time.sleep(float(rest))
+            elif verb == "shot":
+                count += 1
+                out = shots / f"{count:02}-{rest}.png"
+                qmp(port, [{"execute": "screendump", "arguments": {"filename": str(out), "format": "png"}}])
+                time.sleep(0.3)
+                print(f"saved {out.relative_to(ROOT)}")
+            else:
+                try:
+                    qmp(port, ui_commands(action, width, height), pause=0.05)
+                except OSError:
+                    # The guest may have powered off (Start > Shut down).
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        raise RuntimeError(f"lost the QMP connection during {action!r}") from None
+        time.sleep(0.5)
+        powered_off = proc.poll() is not None
+        if powered_off:
+            print(f"the guest powered off (QEMU exit code {proc.returncode})")
+    finally:
+        proc.kill()
+        proc.wait()
+    text = log.read_text(errors="replace") if log.exists() else ""
+    crash = [line for line in text.splitlines() if any(w in line.lower() for w in ("panic", "fault", "exception", "terminated"))]
+    if crash:
+        print("\n".join(crash))
+        print("UI TEST FAILED: the log reports a crash (full log: build/serial-ui.log)")
+        return 1
+    if args.expect_poweroff and not powered_off:
+        print("UI TEST FAILED: the guest did not power off")
+        return 1
+    print(f"UI test finished: {count} screenshot(s) in build/ui/")
+    return 0
+
+
 def cmd_exec(args) -> int:
     """Boot headless, type shell commands on the virtual keyboard, print the
     serial output. With --expect-poweroff, succeed only if the guest powers
-    itself off (e.g. after `shutdown`)."""
-    prepare(args, f"{args.video} {args.cmdline}")
+    itself off (e.g. after `shutdown`). The desktop is not started, so the
+    keystrokes reach the text shell."""
+    prepare(args, f"nodesktop {args.video} {args.cmdline}")
     log = BUILD / "serial-exec.log"
     log.unlink(missing_ok=True)
     with socket.socket() as s:
@@ -606,7 +758,7 @@ def cmd_demo(args) -> int:
     (saving a screenshot of every step to build/demo/) and leaves the
     window open for you to keep exploring."""
     print("Building Meridian OS...", flush=True)
-    prepare(args, f"{args.video} {args.cmdline}")
+    prepare(args, f"nodesktop {args.video} {args.cmdline}")
     log = BUILD / "serial-demo.log"
     log.unlink(missing_ok=True)
     shots = BUILD / "demo"
@@ -669,9 +821,9 @@ def cmd_clean(_args) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Meridian OS build tool")
-    parser.add_argument("command", choices=["build", "run", "test", "screenshot", "exec", "demo", "clean"])
-    parser.add_argument("commands", nargs="*", help="exec: shell commands to type, in order")
-    parser.add_argument("--expect-poweroff", action="store_true", help="exec: require the guest to power off")
+    parser.add_argument("command", choices=["build", "run", "test", "screenshot", "exec", "ui", "demo", "clean"])
+    parser.add_argument("commands", nargs="*", help="exec: shell commands to type; ui: desktop actions")
+    parser.add_argument("--expect-poweroff", action="store_true", help="exec/ui: require the guest to power off")
     parser.add_argument("--screenshot", action="store_true", help="exec: save a screenshot after the commands")
     parser.add_argument("--release", action="store_true", help="optimised build")
     parser.add_argument("--smp", type=int, default=4, help="virtual processors (default 4)")
@@ -690,7 +842,7 @@ def main() -> int:
     QUIET = args.quiet
     BUILD.mkdir(exist_ok=True)
     return {"build": cmd_build, "run": cmd_run, "test": cmd_test, "screenshot": cmd_screenshot,
-            "exec": cmd_exec, "demo": cmd_demo, "clean": cmd_clean}[args.command](args)
+            "exec": cmd_exec, "ui": cmd_ui, "demo": cmd_demo, "clean": cmd_clean}[args.command](args)
 
 
 if __name__ == "__main__":
