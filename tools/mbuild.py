@@ -5,6 +5,7 @@
   python tools/mbuild.py run          build, then boot in a QEMU window (serial log in this terminal)
   python tools/mbuild.py test         build, boot headless with `selftest`, report results (used by CI)
   python tools/mbuild.py screenshot   build, boot headless, save the screen to build/screenshot.png
+  python tools/mbuild.py demo         open Meridian in a window and type a guided tour into it
   python tools/mbuild.py clean        delete build outputs
 
 Common options: --release, --smp N, --memory 512M, --cmdline "extra options".
@@ -467,11 +468,12 @@ def cmd_test(args) -> int:
     return 0
 
 
-def qmp(port: int, commands: list[dict]) -> None:
+def qmp(port: int, commands: list[dict], pause: float = 0.0) -> None:
+    """Sends QMP commands in order, waiting `pause` seconds between them."""
     with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
         f = s.makefile("rw", encoding="utf-8")
         f.readline()  # greeting
-        for c in [{"execute": "qmp_capabilities"}, *commands]:
+        for i, c in enumerate([{"execute": "qmp_capabilities"}, *commands]):
             f.write(json.dumps(c) + "\n")
             f.flush()
             while True:
@@ -480,6 +482,8 @@ def qmp(port: int, commands: list[dict]) -> None:
                     if "error" in reply:
                         raise RuntimeError(f"QMP {c['execute']} failed: {reply['error']}")
                     break
+            if pause and i > 0:
+                time.sleep(pause)
 
 
 def cmd_screenshot(args) -> int:
@@ -581,6 +585,82 @@ def cmd_exec(args) -> int:
         proc.wait()
 
 
+# The guided tour: (command, what it shows, seconds it may take).
+DEMO_STEPS = [
+    ("ver", "kernel version, firmware, display and keyboard", 20),
+    ("cpu", "the processor and its 4 running cores", 20),
+    ('type "C:\\Welcome to Meridian.txt"', "a long-named file read from the FAT32 boot disk", 30),
+    ("dir C:\\MERIDIAN", "the system folder on drive C:", 30),
+    ("disks", "the SATA disk and its GPT partition", 20),
+    ("run C:\\MERIDIAN\\INIT.EXE", "a PE32+ program loaded from disk and run in user mode", 60),
+    ("run init 1", "a program that crashes on purpose; only it is stopped", 60),
+    ("threads", "kernel threads spread over the processors", 20),
+    ("mem", "physical memory and kernel pool use", 20),
+    ("selftest", "all kernel self tests, run live", 300),
+]
+PROMPT = "meridian\x1b[0m> "
+
+
+def cmd_demo(args) -> int:
+    """Opens Meridian in a QEMU window, types a guided tour into its shell
+    (saving a screenshot of every step to build/demo/) and leaves the
+    window open for you to keep exploring."""
+    print("Building Meridian OS...", flush=True)
+    prepare(args, f"{args.video} {args.cmdline}")
+    log = BUILD / "serial-demo.log"
+    log.unlink(missing_ok=True)
+    shots = BUILD / "demo"
+    shots.mkdir(exist_ok=True)
+    for old in shots.glob("*.png"):
+        old.unlink()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    cmd = qemu_command(args, headless=args.headless, extra=[
+        "-serial", f"file:{log.name}", "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off", "-name", "Meridian OS"])
+    show("+", " ".join(cmd))
+    # Detached, so the window stays open after this tool exits.
+    flags = 0x0000_0008 | 0x0000_0200 if os.name == "nt" else 0  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    proc = subprocess.Popen(cmd, cwd=BUILD, creationflags=flags, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=os.name != "nt")
+    print("Meridian OS is booting in a QEMU window...", flush=True)
+    if wait_for_log(log, proc, [BOOT_MARKER], args.timeout) is None:
+        print("error: Meridian did not finish booting; see build/serial-demo.log")
+        return 1
+
+    def prompts() -> int:
+        return log.read_text(errors="replace").count(PROMPT) if log.exists() else 0
+
+    deadline = time.time() + 60
+    while prompts() == 0 and time.time() < deadline:
+        time.sleep(0.25)
+    time.sleep(1.5)
+    failures = 0
+    for number, (command, what, limit) in enumerate(DEMO_STEPS, 1):
+        print(f"[{number}/{len(DEMO_STEPS)}] {command:<34} {what}", flush=True)
+        before = prompts()
+        qmp(port, key_events(command + "\n"), pause=0.04)
+        end = time.time() + limit
+        while prompts() <= before and time.time() < end and proc.poll() is None:
+            time.sleep(0.25)
+        if prompts() <= before:
+            print("        did not finish in time", flush=True)
+            failures += 1
+        time.sleep(args.settle + 1.5)
+        name = "".join(c if c.isalnum() else "-" for c in command.lower()).strip("-")[:28]
+        qmp(port, [{"execute": "screendump",
+                    "arguments": {"filename": str((shots / f"{number:02d}-{name}.png").resolve()), "format": "png"}}])
+    text = log.read_text(errors="replace")
+    passed = "SELFTEST: ALL PASSED" in text
+    print()
+    print("Self tests:", "all passed" if passed else "FAILURES (see build/serial-demo.log)")
+    print(f"Screenshots of every step: {shots.relative_to(ROOT)}")
+    print("The Meridian window stays open: click inside it to type your own commands,")
+    print("press Ctrl+Alt+G to release the mouse, and close the window (or type shutdown) when done.")
+    return 0 if passed and failures == 0 else 1
+
+
 def cmd_clean(_args) -> int:
     shutil.rmtree(BUILD, ignore_errors=True)
     subprocess.run(["cargo", "clean"], cwd=ROOT, check=False)
@@ -589,7 +669,7 @@ def cmd_clean(_args) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Meridian OS build tool")
-    parser.add_argument("command", choices=["build", "run", "test", "screenshot", "exec", "clean"])
+    parser.add_argument("command", choices=["build", "run", "test", "screenshot", "exec", "demo", "clean"])
     parser.add_argument("commands", nargs="*", help="exec: shell commands to type, in order")
     parser.add_argument("--expect-poweroff", action="store_true", help="exec: require the guest to power off")
     parser.add_argument("--screenshot", action="store_true", help="exec: save a screenshot after the commands")
@@ -610,7 +690,7 @@ def main() -> int:
     QUIET = args.quiet
     BUILD.mkdir(exist_ok=True)
     return {"build": cmd_build, "run": cmd_run, "test": cmd_test, "screenshot": cmd_screenshot,
-            "exec": cmd_exec, "clean": cmd_clean}[args.command](args)
+            "exec": cmd_exec, "demo": cmd_demo, "clean": cmd_clean}[args.command](args)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,10 @@ winget install SoftwareFreedomConservancy.QEMU
 ```
 
 Then, on Windows, double-click **`run-meridian.cmd`** in the repository
-folder (or run it from a terminal). Anywhere else, run:
+folder (or run it from a terminal). For a hands-off look, double-click
+**`demo-meridian.cmd`** instead: it opens the same window and types a guided
+tour into it, ending with the full self-test suite, then leaves the window
+open for you. Anywhere else, run:
 
 ```bash
 python tools/mbuild.py run --release

@@ -43,6 +43,7 @@ All commands run from the repository root.
 |---------|--------------|
 | `python tools/mbuild.py build` | Compile boot manager + kernel, write `build/meridian.img` |
 | `run-meridian.cmd` (Windows) | Release build + QEMU window; double-click to try Meridian |
+| `demo-meridian.cmd` (Windows) / `python tools/mbuild.py demo` | Opens the window and types a guided tour (10 steps, ending with the self tests); screenshots go to `build/demo/`; the window stays open |
 | `python tools/mbuild.py run` | Build and boot in a QEMU window; the kernel log and shell also appear in your terminal |
 | `python tools/mbuild.py run --headless` | Same without a window (serial console only) |
 | `python tools/mbuild.py test` | Build and run the kernel self tests headless; exit code 0 = pass |
