@@ -61,17 +61,26 @@ USER_LINK_FLAGS = [
 ]
 
 
+QUIET = False
+
+
+def show(*parts) -> None:
+    """Prints a progress line unless --quiet was given."""
+    if not QUIET:
+        print(*parts, flush=True)
+
+
 def cargo_build(release: bool) -> tuple[Path, Path, dict[str, Path]]:
     profile = "release" if release else "debug"
-    flags = ["--release"] if release else []
+    flags = (["--release"] if release else []) + (["--quiet"] if QUIET else [])
     for package, target in (("meridian-boot", "x86_64-unknown-uefi"), ("meridian-kernel", "x86_64-unknown-none")):
         cmd = ["cargo", "build", "-p", package, "--target", target, *flags]
-        print("+", " ".join(cmd), flush=True)
+        show("+", " ".join(cmd))
         subprocess.run(cmd, cwd=ROOT, check=True)
     programs = {}
     for package, binary, image_name in USER_PROGRAMS:
         cmd = ["cargo", "rustc", "-p", package, "--target", USER_TARGET, *flags, "--", *USER_LINK_FLAGS]
-        print("+", " ".join(cmd), flush=True)
+        show("+", " ".join(cmd))
         subprocess.run(cmd, cwd=ROOT, check=True)
         programs[image_name] = ROOT / "target" / USER_TARGET / profile / f"{binary}.exe"
     boot = ROOT / "target" / "x86_64-unknown-uefi" / profile / "bootx64.efi"
@@ -325,7 +334,7 @@ def make_image(boot: Path, kernel: Path, programs: dict[str, Path], cmdline: str
     fs = Fat32(part_sectors, "MERIDIAN")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(gpt_image(fs.build(tree, PARTITION_START), DISK_SIZE))
-    print(f"wrote {out.relative_to(ROOT)} (kernel {kernel.stat().st_size // 1024} KiB, cmdline \"{cmdline}\")")
+    show(f"wrote {out.relative_to(ROOT)} (kernel {kernel.stat().st_size // 1024} KiB, cmdline \"{cmdline}\")")
 
 
 # --------------------------------------------------------------------------
@@ -394,10 +403,24 @@ def cmd_build(args) -> int:
     return 0
 
 
+RUN_HELP = """
+Meridian OS is starting in a QEMU window.
+  * Click inside the window to type into the Meridian shell.
+  * Press Ctrl+Alt+G to release the mouse from the window.
+  * Try: help   type "C:\\Welcome to Meridian.txt"   dir C:\\MERIDIAN   threads   shutdown
+  * The kernel log also appears below, and you can type commands here too.
+  * Close the QEMU window (or type shutdown) to stop.
+"""
+
+
 def cmd_run(args) -> int:
+    if QUIET:
+        print("Building Meridian OS (the first build takes about a minute)...", flush=True)
     prepare(args, f"{args.video} {args.cmdline}")
     cmd = qemu_command(args, headless=args.headless, extra=["-serial", "stdio"])
-    print("+", " ".join(cmd), flush=True)
+    show("+", " ".join(cmd))
+    if QUIET and not args.headless:
+        print(RUN_HELP, flush=True)
     return subprocess.call(cmd, cwd=BUILD)
 
 
@@ -578,10 +601,13 @@ def main() -> int:
     parser.add_argument("--video", default="video=1280x800", help="display mode option for the kernel")
     parser.add_argument("--cmdline", default="", help="extra kernel command line options")
     parser.add_argument("--headless", action="store_true", help="run: no QEMU window")
+    parser.add_argument("--quiet", action="store_true", help="only print errors and short instructions")
     parser.add_argument("--timeout", type=float, default=180, help="test/screenshot timeout in seconds")
     parser.add_argument("--settle", type=float, default=1.0, help="screenshot: seconds to wait after boot")
     parser.add_argument("--out", default=str(BUILD / "screenshot.png"), help="screenshot output file")
     args = parser.parse_args()
+    global QUIET
+    QUIET = args.quiet
     BUILD.mkdir(exist_ok=True)
     return {"build": cmd_build, "run": cmd_run, "test": cmd_test, "screenshot": cmd_screenshot,
             "exec": cmd_exec, "clean": cmd_clean}[args.command](args)

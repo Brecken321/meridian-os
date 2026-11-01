@@ -83,10 +83,3 @@ pub fn route_isa_irq(irq: u8, vector: u8, apic_id: u32) -> bool {
         acpi::get().and_then(|a| a.madt.as_ref()).map(|m| m.isa_irq_to_gsi(irq)).unwrap_or((irq as u32, false, false));
     route_gsi(gsi, vector, apic_id, level, active_low)
 }
-
-pub fn mask_gsi(gsi: u32) {
-    let list = IOAPICS.lock();
-    if let Some(ioapic) = list.iter().find(|a| gsi >= a.gsi_base && gsi < a.gsi_base + a.inputs) {
-        ioapic.set_entry(gsi - ioapic.gsi_base, MASKED);
-    }
-}

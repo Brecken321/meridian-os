@@ -37,9 +37,9 @@ the self tests or was verified manually in QEMU as noted.
 * Interrupt-driven console input: PS/2 keyboard and COM1 receive interrupts
   wake the shell thread through a DPC and an event.
 * User mode: per-process address spaces (private lower half, shared kernel
-  half), ring-3 threads, SYSCALL/SYSRET system call entry with 14 services
+  half), ring-3 threads, SYSCALL/SYSRET system call entry with 15 services
   (debug output, exit, yield, sleep, ids, memory allocate/free, events, wait,
-  close handle, uptime), per-process handle tables, argument validation with
+  close handle, uptime, system information), per-process handle tables, argument validation with
   fault-safe user copies, CPU exceptions in user mode terminate only the
   process (with NTSTATUS codes), complete teardown of process memory.
 * PE32+ loader: header validation, section mapping with per-section
@@ -55,7 +55,9 @@ the self tests or was verified manually in QEMU as noted.
 * Kernel shell: help, ver, cpu, mem, acpi, pci, irq, threads, ps, run, disks,
   vol, dir, type, uptime, log, clear, selftest, reboot, shutdown, crash.
 * Build: reproducible GPT/FAT32 image writer, QEMU runner, self-test harness,
-  screenshot capture, GitHub Actions CI.
+  screenshot capture, GitHub Actions CI. All crates build without compiler
+  warnings. `run-meridian.cmd` builds a release image and opens it in QEMU
+  with short instructions.
 
 ## Not implemented yet
 

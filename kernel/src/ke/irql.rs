@@ -16,8 +16,6 @@ pub const PASSIVE_LEVEL: Irql = 0;
 pub const APC_LEVEL: Irql = 1;
 /// Thread dispatching (preemption) is masked; spin locks run here.
 pub const DISPATCH_LEVEL: Irql = 2;
-/// Lowest device interrupt level.
-pub const DEVICE_LEVEL_MIN: Irql = 3;
 /// Clock interrupts.
 pub const CLOCK_LEVEL: Irql = 13;
 /// Inter-processor interrupts.

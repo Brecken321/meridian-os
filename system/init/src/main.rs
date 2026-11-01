@@ -55,6 +55,35 @@ fn self_check() -> Result<(), &'static str> {
     let tid = rt::current_thread_id();
     println!("init: hello from ring 3 (process {pid}, thread {tid})");
 
+    // System information comes back through a kernel write into our memory.
+    let info = rt::system_info().map_err(|_| "query_system_info failed")?;
+    if info.page_size != 4096 || info.processor_count == 0 {
+        return Err("system information is implausible");
+    }
+    if info.available_memory > info.physical_memory || info.physical_memory == 0 {
+        return Err("memory figures are inconsistent");
+    }
+    let version_len = info.kernel_version.iter().position(|&b| b == 0).unwrap_or(16);
+    let version = core::str::from_utf8(&info.kernel_version[..version_len]).unwrap_or("?");
+    println!(
+        "init: Meridian {version}, {} processor(s), {} MiB RAM ({} MiB free)",
+        info.processor_count,
+        info.physical_memory >> 20,
+        info.available_memory >> 20
+    );
+    let info_size = core::mem::size_of::<rt::SystemInfo>() as u64;
+    if rt::syscall(service::QUERY_SYSTEM_INFO, 0xFFFF_FFFF_8000_0000, info_size, 0, 0) != status::ACCESS_VIOLATION {
+        return Err("query_system_info wrote to a kernel address");
+    }
+    if rt::syscall(service::QUERY_SYSTEM_INFO, 0x1000_0000, 4, 0, 0) != status::BUFFER_TOO_SMALL {
+        return Err("query_system_info accepted a short buffer");
+    }
+    let read_only = rt::allocate_memory(4096, protection::READ).map_err(|_| "allocate_memory(READ) failed")?;
+    if rt::syscall(service::QUERY_SYSTEM_INFO, read_only as u64, info_size, 0, 0) != status::ACCESS_VIOLATION {
+        return Err("the kernel wrote into read-only user memory");
+    }
+    rt::free_memory(read_only, 4096).map_err(|_| "free_memory failed")?;
+
     // Memory: fresh pages are zeroed, writable and returned on free.
     const SIZE: usize = 256 * 1024;
     let p = rt::allocate_memory(SIZE, protection::READ_WRITE).map_err(|_| "allocate_memory failed")?;

@@ -14,7 +14,6 @@ use crate::sync::Once;
 pub struct GenericAddress {
     /// 0 = system memory, 1 = system I/O.
     pub space: u8,
-    pub bit_width: u8,
     pub address: u64,
 }
 
@@ -127,7 +126,7 @@ fn checksum_ok(addr: u64, len: usize) -> bool {
 }
 
 fn generic_address(addr: u64) -> GenericAddress {
-    GenericAddress { space: u8_at(addr), bit_width: u8_at(addr + 1), address: u64_at(addr + 4) }
+    GenericAddress { space: u8_at(addr), address: u64_at(addr + 4) }
 }
 
 const HEADER_LEN: u64 = 36;

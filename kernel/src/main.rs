@@ -142,7 +142,11 @@ pub extern "C" fn kernel_entry(info: *const BootInfo) -> ! {
         }
     }
 
-    pic::disable();
+    // Mask the legacy 8259 PICs where the platform has them (MADT PCAT_COMPAT;
+    // assume they exist when there is no MADT).
+    if madt.is_none_or(|m| m.pcat_compat) {
+        pic::disable();
+    }
     if let Err(e) = apic::init_bsp(madt.map(|m| m.lapic_base)) {
         panic!("local APIC initialisation failed: {e}");
     }
@@ -251,7 +255,7 @@ fn start_init() {
     };
     match ps::process::spawn("init", image, 0) {
         Ok(p) => {
-            info!("init: started process {} at image base {:#x}", p.id, p.image_base());
+            info!("init: started process {}", p.id);
             p.terminated.wait(Some(10_000));
             match p.exit_status() {
                 Some(0) => info!("init: exited normally"),
@@ -259,7 +263,7 @@ fn start_init() {
                 None => warn!("init: still running after 10 s"),
             }
         }
-        Err(e) => warn!("init: cannot start: {e}"),
+        Err(e) => error!("init: cannot start: {e}"),
     }
 }
 

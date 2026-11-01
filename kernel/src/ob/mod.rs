@@ -17,14 +17,6 @@ pub enum Object {
     Event(Arc<Event>),
 }
 
-impl Object {
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            Object::Event(_) => "Event",
-        }
-    }
-}
-
 const MAX_HANDLES: usize = 16 * 1024;
 
 pub struct HandleTable {

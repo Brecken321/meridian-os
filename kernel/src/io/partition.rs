@@ -33,10 +33,6 @@ impl Partition {
         self.type_guid == ESP_TYPE || self.mbr_type == 0xEF
     }
 
-    pub fn first_lba(&self) -> u64 {
-        self.first_lba
-    }
-
     fn kind(&self) -> &'static str {
         if self.is_esp() {
             "EFI system partition"

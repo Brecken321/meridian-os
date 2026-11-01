@@ -137,7 +137,7 @@ pub fn init_storage() {
     for disk in block::disks() {
         match crate::io::partition::scan(&disk) {
             Ok(n) => crate::info!("storage: {} has {} partition(s)", disk.name(), n),
-            Err(e) => crate::warn!("storage: cannot read the partition table of {}: {e:?}", disk.name()),
+            Err(e) => crate::error!("storage: cannot read the partition table of {}: {e:?}", disk.name()),
         }
     }
     mount_all();

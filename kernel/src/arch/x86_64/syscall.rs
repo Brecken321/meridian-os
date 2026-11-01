@@ -9,7 +9,7 @@
 use core::arch::{asm, global_asm};
 
 use super::cpu;
-use super::gdt::{KERNEL_CS, USER_CS, USER_DS};
+use super::gdt::{KERNEL_CS, USER_CS, USER_CS32, USER_DS};
 
 global_asm!(
     r#"
@@ -99,8 +99,8 @@ pub fn init_processor() {
     // SYSRET loads CS = STAR[63:48] + 16 and SS = STAR[63:48] + 8 (both with
     // RPL 3), which is why the user data segment precedes the 64-bit user
     // code segment in the GDT.
-    let star = ((USER_CS as u64 - 16) << 48) | ((KERNEL_CS as u64) << 32);
-    debug_assert_eq!(USER_CS - 16 + 8, USER_DS);
+    let star = ((USER_CS32 as u64) << 48) | ((KERNEL_CS as u64) << 32);
+    debug_assert!(USER_CS32 + 8 == USER_DS && USER_CS32 + 16 == USER_CS);
     // Mask IF, TF, DF and AC on entry.
     let fmask = (1 << 9) | (1 << 8) | (1 << 10) | (1 << 18);
     // SAFETY: standard SYSCALL configuration; EFER.SCE is already enabled.
@@ -108,6 +108,10 @@ pub fn init_processor() {
         cpu::wrmsr(cpu::IA32_STAR, star);
         cpu::wrmsr(cpu::IA32_LSTAR, meridian_syscall_entry as *const () as u64);
         cpu::wrmsr(cpu::IA32_FMASK, fmask);
+        // User threads start with FS/GS bases of zero; IA32_KERNEL_GS_BASE
+        // holds the user GS base while the kernel runs (swapgs swaps them).
+        cpu::wrmsr(cpu::IA32_FS_BASE, 0);
+        cpu::wrmsr(cpu::IA32_KERNEL_GS_BASE, 0);
     }
 }
 

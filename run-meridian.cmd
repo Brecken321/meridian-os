@@ -9,5 +9,5 @@ rem
 rem Extra options are passed through, for example:
 rem   run-meridian.cmd --smp 2 --memory 1G
 cd /d "%~dp0"
-python tools\mbuild.py run --release %*
+python tools\mbuild.py run --release --quiet %*
 if errorlevel 1 pause

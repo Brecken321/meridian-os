@@ -90,10 +90,22 @@ impl Drop for Process {
 pub fn spawn(name: &str, image: &[u8], arg: u64) -> Result<Arc<Process>, &'static str> {
     let process = Process::new(name).ok_or("out of memory for a new address space")?;
     let loaded = pe::load(&process.space, image)?;
-    if loaded.subsystem != pe::subsystem::NATIVE {
-        return Err("only native-subsystem programs can run yet (Win32 subsystem not implemented)");
+    match loaded.subsystem {
+        pe::subsystem::NATIVE => {}
+        pe::subsystem::WINDOWS_GUI | pe::subsystem::WINDOWS_CUI => {
+            return Err("this is a Windows program; the Win32 subsystem is not implemented yet");
+        }
+        _ => return Err("the program's subsystem is not supported"),
     }
     process.image_base.store(loaded.base, Ordering::Relaxed);
+    crate::info!(
+        "ps: process {} ({}): {} KiB image at {:#x}{}",
+        process.id,
+        name,
+        loaded.size / 1024,
+        loaded.base,
+        if loaded.relocated { " (relocated)" } else { "" }
+    );
     let stack = process
         .space
         .allocate(loaded.stack_size, Protection::ReadWrite)

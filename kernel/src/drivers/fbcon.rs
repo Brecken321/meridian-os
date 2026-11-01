@@ -399,11 +399,6 @@ pub fn write_bytes(bytes: &[u8]) {
     }
 }
 
-/// (columns, rows) of the text area, if the console exists.
-pub fn size() -> Option<(usize, usize)> {
-    CONSOLE.lock_at(HIGH_LEVEL).as_ref().map(|c| (c.cols, c.rows))
-}
-
 pub fn resolution() -> Option<(usize, usize)> {
     CONSOLE.lock_at(HIGH_LEVEL).as_ref().map(|c| (c.fb.width, c.fb.height))
 }

@@ -16,7 +16,6 @@ pub enum IoError {
     DeviceError,
     /// The device did not complete the request in time.
     Timeout,
-    NoMemory,
 }
 
 pub trait BlockDevice: Send + Sync {

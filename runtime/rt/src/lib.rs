@@ -10,7 +10,7 @@
 
 use core::arch::{asm, global_asm};
 
-pub use meridian_abi::{protection, service, status};
+pub use meridian_abi::{SystemInfo, protection, service, status};
 
 // --------------------------------------------------------------------------
 // Memory intrinsics (normally provided by the C runtime on this target).
@@ -171,6 +171,14 @@ pub fn current_thread_id() -> u64 {
 
 pub fn uptime_us() -> u64 {
     syscall(service::UPTIME_US, 0, 0, 0, 0) as u64
+}
+
+/// Processor count, memory sizes and kernel version.
+pub fn system_info() -> Result<SystemInfo, i64> {
+    let mut info = SystemInfo::default();
+    let size = core::mem::size_of::<SystemInfo>() as u64;
+    let r = syscall(service::QUERY_SYSTEM_INFO, &mut info as *mut SystemInfo as u64, size, 0, 0);
+    if status::is_error(r) { Err(r) } else { Ok(info) }
 }
 
 /// Commits `size` bytes of zeroed memory.

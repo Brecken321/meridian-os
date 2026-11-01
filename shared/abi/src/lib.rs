@@ -45,8 +45,11 @@ pub mod service {
     pub const CLOSE_HANDLE: u64 = 12;
     /// `uptime_us() -> microseconds since boot`
     pub const UPTIME_US: u64 = 13;
+    /// `query_system_info(buffer, length) -> bytes written`: fills a
+    /// [`super::SystemInfo`].
+    pub const QUERY_SYSTEM_INFO: u64 = 14;
 
-    pub const COUNT: u64 = 14;
+    pub const COUNT: u64 = 15;
 }
 
 /// `NTSTATUS`-compatible status codes (as signed 64-bit return values).
@@ -60,6 +63,7 @@ pub mod status {
     pub const INVALID_PARAMETER: i64 = 0xC000_000D_u32 as i32 as i64;
     pub const NO_MEMORY: i64 = 0xC000_0017_u32 as i32 as i64;
     pub const OBJECT_TYPE_MISMATCH: i64 = 0xC000_0024_u32 as i32 as i64;
+    pub const BUFFER_TOO_SMALL: i64 = 0xC000_0023_u32 as i32 as i64;
     pub const INVALID_SYSTEM_SERVICE: i64 = 0xC000_001C_u32 as i32 as i64;
     pub const ILLEGAL_INSTRUCTION: i64 = 0xC000_001D_u32 as i32 as i64;
     pub const PRIVILEGED_INSTRUCTION: i64 = 0xC000_0096_u32 as i32 as i64;
@@ -69,6 +73,21 @@ pub mod status {
     pub fn is_error(s: i64) -> bool {
         s < 0
     }
+}
+
+/// Returned by `QUERY_SYSTEM_INFO`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemInfo {
+    pub page_size: u32,
+    pub processor_count: u32,
+    /// RAM owned by the operating system, in bytes.
+    pub physical_memory: u64,
+    /// Free RAM, in bytes.
+    pub available_memory: u64,
+    pub uptime_us: u64,
+    /// Kernel version, UTF-8, NUL padded.
+    pub kernel_version: [u8; 16],
 }
 
 /// Page protections for `ALLOCATE_MEMORY`.

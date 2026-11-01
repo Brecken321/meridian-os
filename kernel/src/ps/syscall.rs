@@ -114,6 +114,29 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
                 None => status::INVALID_HANDLE,
             }
         }
+        service::QUERY_SYSTEM_INFO => {
+            let size = core::mem::size_of::<meridian_abi::SystemInfo>();
+            if (a1 as usize) < size {
+                return status::BUFFER_TOO_SMALL;
+            }
+            let (free, total) = crate::mm::pmm::stats();
+            let mut info = meridian_abi::SystemInfo {
+                page_size: crate::mm::PAGE_SIZE as u32,
+                processor_count: crate::ke::pcr::online_count(),
+                physical_memory: total,
+                available_memory: free,
+                uptime_us: crate::ke::clock::uptime_us(),
+                kernel_version: [0; 16],
+            };
+            let v = crate::VERSION.as_bytes();
+            info.kernel_version[..v.len().min(16)].copy_from_slice(&v[..v.len().min(16)]);
+            // SAFETY: SystemInfo is plain old data with no padding bytes.
+            let bytes = unsafe { core::slice::from_raw_parts(&info as *const _ as *const u8, size) };
+            match user::copy_to_user(a0, bytes) {
+                Ok(()) => size as i64,
+                Err(_) => status::ACCESS_VIOLATION,
+            }
+        }
         _ => status::INVALID_SYSTEM_SERVICE,
     }
 }

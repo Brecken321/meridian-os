@@ -14,10 +14,8 @@ use crate::ps::process::Process;
 /// 16-31 real-time. 0 is reserved for the per-processor idle threads.
 pub mod priority {
     pub const IDLE: u8 = 0;
-    pub const LOW: u8 = 4;
     pub const NORMAL: u8 = 8;
     pub const HIGH: u8 = 12;
-    pub const REALTIME: u8 = 16;
     pub const MAX: u8 = 31;
 }
 

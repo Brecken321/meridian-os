@@ -50,7 +50,8 @@ All commands run from the repository root.
 | `python tools/mbuild.py exec cpu mem shutdown --expect-poweroff` | Boot headless, type shell commands on the virtual keyboard, print the output |
 | `python tools/mbuild.py clean` | Remove `build/` and `target/` |
 
-Useful options: `--release`, `--smp 4`, `--memory 1G`, `--cmdline "mm.verbose"`,
+Useful options: `--release`, `--quiet` (only errors and short instructions;
+used by `run-meridian.cmd`), `--smp 4`, `--memory 1G`, `--cmdline "mm.verbose"`,
 `--video video=1920x1080`, `--accel whpx` (Windows Hypervisor Platform, if you
 have enabled it) or `--accel kvm` (Linux).
 
@@ -66,7 +67,8 @@ largest dependency (the Windows installer includes emulators for many CPU
 architectures; Meridian only uses `qemu-system-x86_64`). On Windows,
 `tools\slim-qemu.ps1 -WhatIf` lists the other emulators and firmware (about
 940 MB) and running it without `-WhatIf` removes them after an
-administrator prompt; reinstalling QEMU with winget undoes it.
+administrator prompt, leaving a 258 MB QEMU; reinstalling QEMU with winget
+undoes it.
 
 ## Kernel command line
 

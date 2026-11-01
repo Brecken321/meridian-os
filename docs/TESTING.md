@@ -58,7 +58,7 @@ Current tests (48):
 | `smp.tlb_shootdown` | After remapping a page, another processor never sees the stale translation |
 | `smp.parallel_threads` | High-priority CPU-bound threads spread across processors |
 | `pe.rejects_bad_images` | Empty, garbage, truncated and corrupted images are rejected without leaking memory |
-| `user.init_self_check` | `init.exe` runs in ring 3 and passes its own checks of memory, events, handles, timeouts and argument validation |
+| `user.init_self_check` | `init.exe` runs in ring 3 and passes its own checks of system information, memory, events, handles, timeouts and argument validation (including that the kernel refuses to write to kernel or read-only user memory) |
 | `user.fault_isolated` | A user write to an unmapped address ends only that process (ACCESS_VIOLATION) |
 | `user.privileged_instruction` | A privileged instruction in ring 3 ends only that process (PRIVILEGED_INSTRUCTION) |
 | `user.kernel_memory_protected` | User code cannot read kernel memory |

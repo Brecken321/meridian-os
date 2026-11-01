@@ -90,12 +90,13 @@ priority class (`vector >> 4`) is the IRQL its handler runs at:
 | 2 | DISPATCH | `0x2F` dispatcher software interrupt (planned) |
 | 5–12 | device | `0x50–0xCF`: keyboard `0x81`, serial `0x82` |
 | 13 | CLOCK | `0xD1` local APIC timer |
-| 14 | IPI | `0xE1` generic, `0xE2` TLB shootdown |
+| 14 | IPI | `0xE1` (reschedule, cross-call and TLB flush requests are bits in the target's PCR) |
 | 15 | HIGH | `0xF0–0xFD` masked legacy PIC, `0xFE` APIC error, `0xFF` spurious |
 
 Spin locks (`sync::SpinLock`) raise to `DISPATCH_LEVEL` by default (or a
 higher level with `lock_at`) and restore the previous IRQL on release. The
-legacy 8259 PICs are remapped to `0xF0` and masked.
+legacy 8259 PICs are remapped to `0xF0` and masked when the MADT reports
+them (PCAT_COMPAT).
 
 ### Recoverable faults
 
@@ -163,7 +164,8 @@ objects, per-processor ready queues and load balancing.
   system-call stack slot at its kernel stack.
 * **Entering ring 3**: `enter_user` builds an `iretq` frame (user CS/SS,
   RFLAGS.IF set), clears every general-purpose register except the argument
-  in RCX, and executes `swapgs; iretq`.
+  in RCX, and executes `swapgs; iretq`. User FS/GS bases start at zero
+  (set on every processor when the system call MSRs are programmed).
 * **System calls**: `syscall` enters `meridian_syscall_entry`, which switches
   to the thread's kernel stack, saves a `SyscallFrame`, enables interrupts
   and calls the service dispatcher (`ps/syscall.rs`). Arguments follow

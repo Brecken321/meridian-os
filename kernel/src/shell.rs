@@ -64,7 +64,7 @@ pub fn run() -> ! {
                     cmd_clear("");
                     kprint!("{PROMPT}{line}");
                 }
-                ps2::Key::Char(c) => input(&mut line, c),
+                ps2::Key::Char(c) if !ev.alt => input(&mut line, c),
                 ps2::Key::Enter => input(&mut line, '\n'),
                 ps2::Key::Backspace => input(&mut line, '\x08'),
                 _ => {}
@@ -134,6 +134,7 @@ fn cmd_ver(_: &str) {
         Some((w, h)) => kprintln!("  display:      {w}x{h} framebuffer"),
         None => kprintln!("  display:      none (serial console only)"),
     }
+    kprintln!("  keyboard:     {}", if ps2::present() { "PS/2" } else { "none detected (serial input only)" });
 }
 
 fn cmd_cpu(_: &str) {
@@ -227,6 +228,12 @@ fn cmd_acpi(_: &str) {
     if let Some(base) = a.hpet_base {
         kprintln!("  HPET at {base:#x}");
     }
+    if let Some(f) = &a.fadt {
+        kprintln!("  SCI interrupt: {}", f.sci_interrupt);
+    }
+    for m in &a.mcfg {
+        kprintln!("  PCIe ECAM at {:#x}: segment {}, buses {}-{}", m.base, m.segment, m.start_bus, m.end_bus);
+    }
     match a.s5 {
         Some((ta, tb)) => kprintln!("  soft-off (S5) sleep type: {ta}/{tb}"),
         None => kprintln!("  soft-off (S5): not described"),
@@ -235,15 +242,21 @@ fn cmd_acpi(_: &str) {
 
 fn cmd_pci(_: &str) {
     for d in pci::devices() {
+        let irq = match d.interrupt_pin {
+            1..=4 => alloc::format!("  INT{}# line {}", (b'A' + d.interrupt_pin - 1) as char, d.interrupt_line),
+            _ => String::new(),
+        };
         kprintln!(
-            "  {:02x}:{:02x}.{} {:04x}:{:04x} {:<16} {}",
+            "  {:02x}:{:02x}.{} {:04x}:{:04x} rev {:02x} {:<16} {}{}",
             d.bus,
             d.device,
             d.function,
             d.vendor_id,
             d.device_id,
+            d.revision,
             d.vendor_name(),
-            d.class_name()
+            d.class_name(),
+            irq
         );
     }
     kprintln!("{} devices", pci::devices().len());
@@ -293,9 +306,10 @@ fn cmd_ps(_: &str) {
             None => String::from("running"),
         };
         kprintln!(
-            "  {:>5}  {:<16} {:>8} KiB  {:>3} handles  {}",
+            "  {:>5}  {:<16} image {:#x}  {:>8} KiB  {:>3} handles  {}",
             p.id,
             p.name(),
+            p.image_base(),
             p.space.committed() / 1024,
             p.handles.lock().open_count(),
             state
@@ -407,12 +421,18 @@ fn cmd_dir(args: &str) {
             kprintln!(" Directory of {path}\n");
             let (mut files, mut bytes) = (0, 0);
             for e in &entries {
+                let flags = match (e.hidden, e.read_only) {
+                    (true, true) => "  [hidden, read-only]",
+                    (true, false) => "  [hidden]",
+                    (false, true) => "  [read-only]",
+                    (false, false) => "",
+                };
                 if e.is_dir {
-                    kprintln!("  <DIR>          {}", e.name);
+                    kprintln!("  <DIR>          {}{}", e.name, flags);
                 } else {
                     files += 1;
                     bytes += e.size;
-                    kprintln!("  {:>14}  {}", e.size, e.name);
+                    kprintln!("  {:>14}  {}{}", e.size, e.name, flags);
                 }
             }
             kprintln!("  {} file(s), {} bytes; {} dir(s)", files, bytes, entries.len() - files);
