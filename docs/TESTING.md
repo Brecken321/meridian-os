@@ -18,7 +18,7 @@ command line, and the kernel:
 A kernel crash during the tests exits QEMU with the failure code, and a hang
 is caught by the harness timeout, so CI never waits forever.
 
-Current tests (41):
+Current tests (48):
 
 | Test | Checks |
 |------|--------|
@@ -63,6 +63,13 @@ Current tests (41):
 | `user.privileged_instruction` | A privileged instruction in ring 3 ends only that process (PRIVILEGED_INSTRUCTION) |
 | `user.kernel_memory_protected` | User code cannot read kernel memory |
 | `user.memory_reclaimed` | Five complete process lifetimes leak no memory |
+| `ahci.disk_readable` | The SATA disk is identified; single-sector and multi-chunk (160 KiB) reads agree; reads past the end fail |
+| `gpt.esp_found` | The GPT is parsed and the EFI system partition found |
+| `fat.root_listing` | `C:\` and `C:\MERIDIAN` list the expected entries (paths with `\` or `/`, any case) |
+| `fat.file_matches_boot_module` | `INIT.EXE` and `CMDLINE.TXT` read from disk are byte-identical to what the boot manager loaded |
+| `fat.long_file_name` | A file with a long name reads correctly by its long name and by its `WELCOM~1.TXT` alias |
+| `fat.errors` | Missing files, wrong types, unknown drives and malformed paths return the right errors |
+| `user.run_from_disk` | A program read from disk runs in user mode and exits successfully |
 
 ### Adding a test
 
@@ -78,8 +85,9 @@ QEMU + OVMF from apt):
 2. self tests, debug build
 3. self tests, release build
 4. boot screenshot
-5. interactive shell check: `mbuild.py exec help ps "run init 1" "run init"
-   shutdown --expect-poweroff` types commands on the emulated PS/2 keyboard (through
+5. interactive shell check: `mbuild.py exec` types `help`, `ps`,
+   `run init 1`, `dir C:\MERIDIAN`, `type "C:\Welcome to Meridian.txt"`,
+   `run C:\MERIDIAN\INIT.EXE` and `shutdown` with `--expect-poweroff` types commands on the emulated PS/2 keyboard (through
    QEMU's QMP `send-key`) and requires the VM to power itself off through
    ACPI, which exercises the keyboard driver, I/O APIC routing, the shell and
    ACPI S5 end to end

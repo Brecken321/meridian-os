@@ -6,7 +6,7 @@ Meridian claims support for hardware only after it has been tested.
 
 | Platform | Firmware | Result | Date |
 |----------|----------|--------|------|
-| QEMU 11.1.0 `q35`, TCG, `-cpu max`, 1–4 vCPUs, 512 MiB | edk2 (bundled with QEMU for Windows) | Boots; all 19 self tests pass; framebuffer, PS/2 keyboard, serial, HPET, ACPI power-off | 2026-10-31 |
+| QEMU 11.1.0 `q35`, TCG, `-cpu max`, 1–4 vCPUs, 512 MiB | edk2 (bundled with QEMU for Windows) | Boots; all 48 self tests pass; framebuffer, PS/2 keyboard, serial, HPET, AHCI disk, ACPI power-off | 2026-10-31 |
 | QEMU (Ubuntu 24.04 package) `q35`, TCG | OVMF (Ubuntu package) | Run by CI on every push | continuous |
 
 **No physical computer has been tested yet.**
@@ -34,7 +34,9 @@ Meridian claims support for hardware only after it has been tested.
 | Bus | PCI configuration (CF8/CFC) | ✅ tested in QEMU |
 | Power | ACPI S5 soft-off | ✅ tested in QEMU |
 | Power | ACPI reset register | ⚠️ implemented, untested |
-| Storage | AHCI, NVMe, virtio-blk | ⬜ planned |
+| Storage | AHCI SATA disks (read-only) | ✅ tested in QEMU (ICH9 AHCI) |
+| Storage | ATAPI optical drives | ⚠️ detected and skipped |
+| Storage | NVMe, virtio-blk, USB mass storage | ⬜ planned |
 | USB | xHCI, HID | ⬜ planned |
 | Network | e1000, virtio-net, Intel/Realtek | ⬜ planned |
 | Audio | HD Audio | ⬜ planned |

@@ -29,7 +29,15 @@ const COMMANDS: &[Command] = &[
     Command { name: "irq", help: "interrupt statistics", run: cmd_irq },
     Command { name: "threads", help: "kernel threads and scheduler statistics", run: cmd_threads },
     Command { name: "ps", help: "user-mode processes", run: cmd_ps },
-    Command { name: "run", help: "run a boot module as a user process: run init [arg]", run: cmd_run },
+    Command {
+        name: "run",
+        help: "run a program: run C:\\path\\prog.exe [arg] (or a boot module: run init)",
+        run: cmd_run,
+    },
+    Command { name: "disks", help: "disks and partitions", run: cmd_disks },
+    Command { name: "vol", help: "mounted volumes (drive letters)", run: cmd_vol },
+    Command { name: "dir", help: "list a directory: dir C:\\MERIDIAN", run: cmd_dir },
+    Command { name: "type", help: "print a text file: type \"C:\\Welcome to Meridian.txt\"", run: cmd_type },
     Command { name: "uptime", help: "time since boot", run: cmd_uptime },
     Command { name: "log", help: "replay the kernel log", run: cmd_log },
     Command { name: "clear", help: "clear the screen", run: cmd_clear },
@@ -295,18 +303,58 @@ fn cmd_ps(_: &str) {
     }
 }
 
+/// Splits a command line into words, honouring double quotes.
+fn split_args(args: &str) -> alloc::vec::Vec<String> {
+    let mut words = alloc::vec::Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in args.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    words.push(core::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
 fn cmd_run(args: &str) {
-    let mut words = args.split_whitespace();
-    let Some(name) = words.next() else {
-        kprintln!("usage: run <module> [argument]");
+    let words = split_args(args);
+    let Some(target) = words.first() else {
+        kprintln!("usage: run <C:\\path\\program.exe | boot module> [argument]");
         return;
     };
-    let arg = words.next().and_then(|a| a.parse::<u64>().ok()).unwrap_or(0);
-    let file = if name.contains('.') { String::from(name) } else { alloc::format!("{name}.exe") };
-    let Some(image) = crate::boot_module(&file) else {
-        kprintln!("no boot module named {file}");
-        return;
+    let arg = words.get(1).and_then(|a| a.parse::<u64>().ok()).unwrap_or(0);
+    let from_disk;
+    let image: &[u8] = if target.contains(':') {
+        match crate::fs::read_file(target) {
+            Ok(data) => {
+                from_disk = data;
+                &from_disk
+            }
+            Err(e) => {
+                kprintln!("cannot read {target}: {}", e.message());
+                return;
+            }
+        }
+    } else {
+        let file = if target.contains('.') { target.clone() } else { alloc::format!("{target}.exe") };
+        match crate::boot_module(&file) {
+            Some(m) => m,
+            None => {
+                kprintln!("no boot module named {file}");
+                return;
+            }
+        }
     };
+    let name = target.rsplit(['\\', '/']).next().unwrap_or(target).trim_end_matches(".exe").trim_end_matches(".EXE");
     match crate::ps::process::spawn(name, image, arg) {
         Ok(p) => {
             kprintln!("started process {} ({})", p.id, name);
@@ -316,7 +364,82 @@ fn cmd_run(args: &str) {
                 kprintln!("process {} exited with status {:#x}", p.id, p.exit_status().unwrap_or(0) as u32);
             }
         }
-        Err(e) => kprintln!("cannot start {file}: {e}"),
+        Err(e) => kprintln!("cannot start {target}: {e}"),
+    }
+}
+
+fn cmd_disks(_: &str) {
+    let disks = crate::io::block::disks();
+    if disks.is_empty() {
+        kprintln!("no disks found");
+    }
+    for d in disks {
+        kprintln!("  {:<24} {:>8} MiB  {}", d.name(), d.size_bytes() >> 20, d.description());
+    }
+    for p in crate::io::block::partitions() {
+        kprintln!("  {:<24} {:>8} MiB  {}", p.name(), p.size_bytes() >> 20, p.description());
+    }
+}
+
+fn cmd_vol(_: &str) {
+    let volumes = crate::fs::volumes();
+    if volumes.is_empty() {
+        kprintln!("no volumes are mounted");
+    }
+    for v in volumes {
+        kprintln!(
+            "  {}:  FAT32  {:<12} {:>8} MiB  {} ({})",
+            v.letter,
+            v.fs.label,
+            v.fs.size_bytes() >> 20,
+            v.device.name(),
+            v.device.description()
+        );
+    }
+}
+
+fn cmd_dir(args: &str) {
+    let words = split_args(args);
+    let path = words.first().map(String::as_str).unwrap_or("C:\\");
+    match crate::fs::list(path) {
+        Ok(mut entries) => {
+            entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+            kprintln!(" Directory of {path}\n");
+            let (mut files, mut bytes) = (0, 0);
+            for e in &entries {
+                if e.is_dir {
+                    kprintln!("  <DIR>          {}", e.name);
+                } else {
+                    files += 1;
+                    bytes += e.size;
+                    kprintln!("  {:>14}  {}", e.size, e.name);
+                }
+            }
+            kprintln!("  {} file(s), {} bytes; {} dir(s)", files, bytes, entries.len() - files);
+        }
+        Err(e) => kprintln!("{path}: {}", e.message()),
+    }
+}
+
+fn cmd_type(args: &str) {
+    let words = split_args(args);
+    let Some(path) = words.first() else {
+        kprintln!("usage: type <C:\\path\\file>");
+        return;
+    };
+    match crate::fs::read_file(path) {
+        Ok(data) => {
+            const LIMIT: usize = 16 * 1024;
+            let text = String::from_utf8_lossy(&data[..data.len().min(LIMIT)]);
+            kprint!("{text}");
+            if !text.ends_with('\n') {
+                kprintln!();
+            }
+            if data.len() > LIMIT {
+                kprintln!("[... {} more bytes not shown]", data.len() - LIMIT);
+            }
+        }
+        Err(e) => kprintln!("{path}: {}", e.message()),
     }
 }
 

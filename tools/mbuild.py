@@ -83,11 +83,67 @@ def cargo_build(release: bool) -> tuple[Path, Path, dict[str, Path]]:
 # FAT32 + GPT image writer
 # --------------------------------------------------------------------------
 
+VALID_83 = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$%'-_@~`!(){}^#&")
+
+
+def fits_83(name: str) -> bool:
+    """True if `name` can be stored as a plain upper-case 8.3 entry."""
+    base, _, ext = name.partition(".")
+    return "." not in ext and 1 <= len(base) <= 8 and len(ext) <= 3 and all(c in VALID_83 for c in base + ext)
+
+
 def short_name(name: str) -> bytes:
-    base, _, ext = name.upper().partition(".")
-    if not (1 <= len(base) <= 8 and len(ext) <= 3):
-        raise ValueError(f"{name!r} is not a valid 8.3 file name")
+    base, _, ext = name.partition(".")
     return base.ljust(8).encode("ascii") + ext.ljust(3).encode("ascii")
+
+
+def short_alias(name: str, taken: set) -> bytes:
+    """Windows-style numeric-tail alias, e.g. "Welcome to Meridian.txt" -> WELCOM~1.TXT."""
+    base, _, ext = name.rpartition(".") if "." in name else (name, "", "")
+    clean = lambda s: "".join(c for c in s.upper() if c in VALID_83)
+    stem, suffix = clean(base) or "FILE", clean(ext)[:3]
+    for n in range(1, 10):
+        candidate = (stem[:6] + f"~{n}").ljust(8).encode("ascii") + suffix.ljust(3).encode("ascii")
+        if candidate not in taken:
+            return candidate
+    raise ValueError(f"too many similar names for {name!r}")
+
+
+def lfn_checksum(short11: bytes) -> int:
+    s = 0
+    for c in short11:
+        s = (((s & 1) << 7) + (s >> 1) + c) & 0xFF
+    return s
+
+
+def utf16_units(name: str) -> list:
+    data = name.encode("utf-16-le")
+    return [int.from_bytes(data[i:i + 2], "little") for i in range(0, len(data), 2)]
+
+
+def lfn_slots(name: str) -> int:
+    return 0 if fits_83(name) else -(-len(utf16_units(name)) // 13)
+
+
+def lfn_entries(name: str, short11: bytes) -> list:
+    """VFAT long-name entries for `name`, in on-disk order (last part first)."""
+    units = utf16_units(name)
+    n = lfn_slots(name)
+    if len(units) % 13:
+        units = units + [0x0000] + [0xFFFF] * (n * 13 - len(units) - 1)
+    pack = lambda us: b"".join(u.to_bytes(2, "little") for u in us)
+    checksum = lfn_checksum(short11)
+    entries = []
+    for seq in range(n, 0, -1):
+        part = units[(seq - 1) * 13:seq * 13]
+        order = seq | (0x40 if seq == n else 0)
+        entries.append(struct.pack("<B10sBBB12sH4s", order, pack(part[0:5]), 0x0F, 0, checksum,
+                                   pack(part[5:11]), 0, pack(part[11:13])))
+    return entries
+
+
+def dir_slots(tree: dict, is_root: bool) -> int:
+    return (1 if is_root else 2) + sum(1 + lfn_slots(name) for name in tree)
 
 
 FAT_DATE = ((2026 - 1980) << 9) | (1 << 5) | 1  # 2026-01-01
@@ -148,22 +204,29 @@ class Fat32:
         else:
             entries.append(dir_entry(b".          ", 0x10, cluster, 0))
             entries.append(dir_entry(b"..         ", 0x10, parent, 0))
+        taken = set()
         for name in sorted(tree):
             node = tree[name]
+            if fits_83(name):
+                short = short_name(name)
+            else:
+                short = short_alias(name, taken)
+                entries.extend(lfn_entries(name, short))
+            taken.add(short)
             if isinstance(node, dict):
-                child = self.alloc((len(node) + 2) * 32)
-                entries.append(dir_entry(short_name(name), 0x10, child, 0))
+                child = self.alloc(dir_slots(node, False) * 32)
+                entries.append(dir_entry(short, 0x10, child, 0))
                 # ".." of a root child must be 0, per the FAT specification.
                 self.add_directory(node, child, 0 if is_root else cluster, False)
             else:
                 first = self.alloc(len(node)) if node else 0
                 if node:
                     self.write(first, node)
-                entries.append(dir_entry(short_name(name), 0x20, first, len(node)))
+                entries.append(dir_entry(short, 0x20, first, len(node)))
         self.write(cluster, b"".join(entries))
 
     def build(self, tree: dict, hidden_sectors: int) -> bytes:
-        root = self.alloc(32 * (len(tree) + 1))
+        root = self.alloc(32 * dir_slots(tree, True))
         self.add_directory(tree, root, 0, True)
 
         bpb = bytearray(SECTOR)
@@ -230,6 +293,25 @@ def gpt_image(partition: bytes, disk_size: int) -> bytes:
     return bytes(disk)
 
 
+WELCOME_TEXT = """Welcome to Meridian OS!
+
+You are reading this file from the boot disk through Meridian's own AHCI
+disk driver, GPT partition reader and FAT32 file system (with long file
+names), all written from scratch for this kernel. Storage is read-only for
+now, so nothing here can change a disk.
+
+Things to try in this shell:
+  dir C:\\MERIDIAN           list the system folder
+  run C:\\MERIDIAN\\INIT.EXE  run a program from disk in user mode
+  run init 1                watch a crashing program get stopped safely
+  threads, ps, cpu, mem     look inside the kernel
+  disks, vol                storage devices and drive letters
+  shutdown                  power off
+
+Meridian is early, honest work in progress: see docs/STATUS.md.
+"""
+
+
 def make_image(boot: Path, kernel: Path, programs: dict[str, Path], cmdline: str, out: Path) -> None:
     meridian = {"KERNEL.ELF": kernel.read_bytes(), "CMDLINE.TXT": cmdline.encode("utf-8")}
     for name, path in programs.items():
@@ -237,6 +319,7 @@ def make_image(boot: Path, kernel: Path, programs: dict[str, Path], cmdline: str
     tree = {
         "EFI": {"BOOT": {"BOOTX64.EFI": boot.read_bytes()}},
         "MERIDIAN": meridian,
+        "Welcome to Meridian.txt": WELCOME_TEXT.encode("utf-8"),
     }
     part_sectors = DISK_SIZE // SECTOR - PARTITION_START - 34
     fs = Fat32(part_sectors, "MERIDIAN")
@@ -404,7 +487,9 @@ def cmd_screenshot(args) -> int:
         proc.wait()
 
 
-QCODES = {" ": "spc", "\n": "ret", "-": "minus", "=": "equal", ".": "dot", "/": "slash", ",": "comma"}
+QCODES = {" ": "spc", "\n": "ret", "-": "minus", "=": "equal", ".": "dot", "/": "slash", ",": "comma",
+          "\\": "backslash", ";": "semicolon", "'": "apostrophe"}
+SHIFTED = {":": "semicolon", '"': "apostrophe", "_": "minus", "~": "grave_accent", "!": "1"}
 
 
 def key_events(text: str) -> list[dict]:
@@ -415,6 +500,8 @@ def key_events(text: str) -> list[dict]:
             keys = [ch.lower()] if not ch.isupper() else ["shift", ch.lower()]
         elif ch in QCODES:
             keys = [QCODES[ch]]
+        elif ch in SHIFTED:
+            keys = ["shift", SHIFTED[ch]]
         else:
             raise ValueError(f"cannot type {ch!r}")
         commands.append({"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": k} for k in keys]}})

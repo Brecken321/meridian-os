@@ -23,7 +23,9 @@ before starting; update both when a milestone moves.
 ## Layout
 
 - `boot/` UEFI boot manager (own UEFI bindings), `shared/bootinfo/` handoff ABI
-- `kernel/src/{arch/x86_64,hal,ke,mm,ob,ps,drivers}` + `shell.rs`, `selftest.rs`, `panic.rs`
+- `kernel/src/{arch/x86_64,hal,ke,mm,ob,ps,io,fs,drivers}` + `shell.rs`, `selftest.rs`, `panic.rs`
+- Storage is read-only by design (no write path exists); AHCI in `drivers/ahci.rs`, FAT32 in `fs/fat.rs`
+- `run-meridian.cmd` is the one-click way for the user to try a release build
 - `shared/abi/` syscall numbers + NTSTATUS; `runtime/rt/` native user runtime; `system/init/` first program
 - User programs: PE32+ via `cargo rustc --target x86_64-pc-windows-msvc` + rust-lld (see `USER_PROGRAMS` in mbuild.py)
 - `tools/mbuild.py` build/run/test/screenshot; writes GPT+FAT32 image itself

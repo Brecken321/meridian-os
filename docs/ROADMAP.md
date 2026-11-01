@@ -32,12 +32,13 @@ Update this file whenever a milestone moves.
 * ✅ System calls (SYSCALL/SYSRET), user-mode address spaces, safe user-memory copies (SMAP-aware)
 * ⬜ PFN database, demand paging, sections (shared/mapped memory)
 
-## Phase 4 — Storage and devices ⬜
+## Phase 4 — Storage and devices 🚧
 
-* ⬜ Driver model and I/O manager (IRPs or message-based), PnP enumeration
-* ⬜ PCIe ECAM, MSI/MSI-X
-* ⬜ Storage: virtio-blk, AHCI, NVMe
-* ⬜ VFS, FAT32 (read/write), exFAT; NTFS read-only first
+* 🚧 I/O manager: block device layer ✅; driver model (IRPs or message-based) and PnP enumeration ⬜
+* ⬜ PCIe ECAM, MSI/MSI-X, interrupt-driven I/O
+* ✅ Storage: AHCI SATA (read-only, polled); ⬜ NVMe, virtio-blk, writes
+* ✅ Partitions: GPT and MBR primary entries
+* ✅ Volumes with drive letters; FAT32 read-only with long file names; ⬜ FAT write, FAT12/16, exFAT; NTFS read-only first
 * ⬜ USB: xHCI, HID keyboard/mouse; PS/2 mouse
 * ⬜ ACPI AML interpreter (evaluate a vetted existing implementation vs. own)
 
@@ -97,8 +98,8 @@ Update this file whenever a milestone moves.
 
 1. User-mode thread creation and multi-threaded process termination; process
    creation from user mode (so init can start other programs).
-2. I/O manager and driver model; PCIe ECAM/MSI; first storage driver
-   (virtio-blk or AHCI) and a read-only FAT32 filesystem, so programs load
-   from disk instead of as boot modules.
-3. PE imports (a native `msys.dll`), which is also the first step towards
-   loading Win32 DLLs.
+2. PE imports (a native `msys.dll` loaded from `C:\MERIDIAN`), which is
+   also the first step towards loading Win32 DLLs.
+3. File system system calls (open/read/directory listing) so user programs
+   can use storage; then MSI interrupts for AHCI, an NVMe driver and USB
+   (xHCI + mass storage) to reach real hardware.

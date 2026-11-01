@@ -18,7 +18,9 @@ mod log;
 
 mod arch;
 mod drivers;
+mod fs;
 mod hal;
+mod io;
 mod ke;
 mod mm;
 mod ob;
@@ -207,6 +209,7 @@ pub extern "C" fn kernel_entry(info: *const BootInfo) -> ! {
 
     let selftest = info.has_option("selftest");
     let started = ke::sched::spawn("shell", ke::thread::priority::NORMAL, move || {
+        fs::init_storage();
         if !selftest {
             start_init();
         }
@@ -224,11 +227,27 @@ pub extern "C" fn kernel_entry(info: *const BootInfo) -> ! {
     ke::sched::idle_loop()
 }
 
-/// Runs the first user-mode program and reports how it ended.
+/// Runs the first user-mode program and reports how it ended. It is read
+/// from the boot disk when storage works, otherwise taken from the copy the
+/// boot manager loaded.
 fn start_init() {
-    let Some(image) = boot_module("init.exe") else {
-        warn!("init: \\meridian\\init.exe was not loaded; no user-mode programs will run");
-        return;
+    const PATH: &str = "C:\\MERIDIAN\\INIT.EXE";
+    let from_disk = fs::read_file(PATH);
+    let image: &[u8] = match &from_disk {
+        Ok(data) => {
+            info!("init: loaded {PATH} from disk ({} KiB)", data.len().div_ceil(1024));
+            data
+        }
+        Err(e) => match boot_module("init.exe") {
+            Some(module) => {
+                info!("init: {PATH} not readable ({}); using the boot module", e.message());
+                module
+            }
+            None => {
+                warn!("init: no init program found; no user-mode programs will run");
+                return;
+            }
+        },
     };
     match ps::process::spawn("init", image, 0) {
         Ok(p) => {

@@ -31,11 +31,12 @@ tested on every commit in QEMU with UEFI firmware:
 | Events, semaphores, mutexes, timed waits, sleep | ✅ working |
 | Multiprocessor: all cores started, IPIs, TLB shootdown, multicore scheduling | ✅ working |
 | User mode: isolated processes, system calls, handles, PE32+ loader | ✅ working (first native program runs) |
-| Storage drivers and filesystems | 🚧 next |
+| Storage: AHCI SATA driver, GPT/MBR partitions, FAT32 with long names, drive letters (read-only) | ✅ working |
+| Writable storage, NTFS, NVMe, USB | 🚧 next |
 | Win32 subsystem, desktop, networking, GPU… | 📋 planned |
 
 The first user-mode program (`init.exe`, a PE32+ executable built from
-`system/init`) runs in ring 3 at every boot; a program that crashes is
+`system/init`) is read from the boot disk and runs in ring 3 at every boot; a program that crashes is
 terminated without affecting the kernel. Nothing runs Windows applications
 yet (the Win32 subsystem does not exist), there is no desktop yet, and no real
 hardware has been tested yet. See [docs/STATUS.md](docs/STATUS.md) for the
@@ -62,8 +63,9 @@ GPT disk image to `build/meridian.img` and boots it in a QEMU window. Click
 inside the window to type. Build output stays small (about 15 MB in
 `target/` plus the 48 MB disk image) and `python tools/mbuild.py clean`
 removes all of it. The kernel shell accepts
-commands such as `help`, `cpu`, `mem`, `threads`, `ps`, `run init`, `pci`,
-`acpi`, `uptime` and `shutdown`.
+commands such as `help`, `dir C:\MERIDIAN`, `type "C:\Welcome to Meridian.txt"`,
+`run C:\MERIDIAN\INIT.EXE`, `threads`, `ps`, `cpu`, `mem`, `disks`, `vol`
+and `shutdown`.
 
 Run the automated kernel tests:
 

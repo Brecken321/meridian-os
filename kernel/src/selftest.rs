@@ -81,6 +81,13 @@ const TESTS: &[Test] = &[
     Test { name: "user.privileged_instruction", run: user_privileged_instruction },
     Test { name: "user.kernel_memory_protected", run: user_kernel_memory_protected },
     Test { name: "user.memory_reclaimed", run: user_memory_reclaimed },
+    Test { name: "ahci.disk_readable", run: ahci_disk_readable },
+    Test { name: "gpt.esp_found", run: gpt_esp_found },
+    Test { name: "fat.root_listing", run: fat_root_listing },
+    Test { name: "fat.file_matches_boot_module", run: fat_file_matches_module },
+    Test { name: "fat.long_file_name", run: fat_long_file_name },
+    Test { name: "fat.errors", run: fat_errors },
+    Test { name: "user.run_from_disk", run: user_run_from_disk },
 ];
 
 /// Runs every test; returns (passed, failed).
@@ -747,5 +754,89 @@ fn user_memory_reclaimed() -> TestResult {
     sched::sleep_ms(10);
     let (after, _) = pmm::stats();
     ensure!(before.abs_diff(after) <= 16 * PAGE_SIZE, "processes leaked {} KiB", (before as i64 - after as i64) / 1024);
+    Ok(())
+}
+
+fn ahci_disk_readable() -> TestResult {
+    let disks = crate::io::block::disks();
+    let disk = disks.first().ok_or("no disk was detected")?;
+    ensure!(disk.sector_size() == 512, "unexpected sector size {}", disk.sector_size());
+    ensure!(disk.size_bytes() >= 32 << 20, "disk reports only {} bytes", disk.size_bytes());
+    let mut mbr = alloc::vec![0u8; 512];
+    disk.read_sectors(0, &mut mbr).map_err(|e| format!("read of LBA 0 failed: {e:?}"))?;
+    ensure!(mbr[510..512] == [0x55, 0xAA], "LBA 0 has no boot signature");
+    ensure!(mbr[446 + 4] == 0xEE, "LBA 0 is not a GPT protective MBR");
+    // A multi-chunk read (larger than the 64 KiB bounce buffer).
+    let mut big = alloc::vec![0u8; 160 * 1024];
+    disk.read_sectors(0, &mut big).map_err(|e| format!("160 KiB read failed: {e:?}"))?;
+    ensure!(big[..512] == mbr[..], "multi-chunk read disagrees with the single-sector read");
+    ensure!(&big[512..520] == b"EFI PART", "LBA 1 is not a GPT header");
+    let mut past_end = alloc::vec![0u8; 512];
+    ensure!(disk.read_sectors(disk.sector_count(), &mut past_end).is_err(), "read past the end of the disk succeeded");
+    Ok(())
+}
+
+fn gpt_esp_found() -> TestResult {
+    let parts = crate::io::block::partitions();
+    ensure!(!parts.is_empty(), "no partitions found");
+    ensure!(
+        parts.iter().any(|p| p.description().starts_with("EFI system partition")),
+        "no EFI system partition among {} partition(s)",
+        parts.len()
+    );
+    Ok(())
+}
+
+fn fat_root_listing() -> TestResult {
+    let names: Vec<String> = crate::fs::list("C:\\").map_err(|e| e.message())?.into_iter().map(|e| e.name).collect();
+    for want in ["EFI", "MERIDIAN"] {
+        ensure!(names.iter().any(|n| n == want), "C:\\ lacks {want} (has {names:?})");
+    }
+    let sub: Vec<String> =
+        crate::fs::list("c:/meridian").map_err(|e| e.message())?.into_iter().map(|e| e.name).collect();
+    for want in ["KERNEL.ELF", "INIT.EXE", "CMDLINE.TXT"] {
+        ensure!(sub.iter().any(|n| n == want), "C:\\MERIDIAN lacks {want}");
+    }
+    Ok(())
+}
+
+fn fat_file_matches_module() -> TestResult {
+    let from_disk = crate::fs::read_file("C:\\MERIDIAN\\INIT.EXE").map_err(|e| e.message())?;
+    let module = init_image()?;
+    ensure!(from_disk.len() == module.len(), "size differs: disk {} vs module {}", from_disk.len(), module.len());
+    ensure!(from_disk == module, "INIT.EXE read from disk differs from the boot manager's copy");
+    let cmdline = crate::fs::read_file("C:\\MERIDIAN\\CMDLINE.TXT").map_err(|e| e.message())?;
+    ensure!(cmdline == crate::boot_info().cmdline().as_bytes(), "CMDLINE.TXT differs from the boot command line");
+    Ok(())
+}
+
+fn fat_long_file_name() -> TestResult {
+    let text = crate::fs::read_file("C:\\Welcome to Meridian.txt").map_err(|e| e.message())?;
+    let text = core::str::from_utf8(&text).map_err(|_| "welcome file is not UTF-8")?;
+    ensure!(text.starts_with("Welcome to Meridian OS"), "unexpected contents: {:?}", &text[..text.len().min(40)]);
+    // The same file through its generated 8.3 alias.
+    let alias = crate::fs::read_file("C:\\WELCOM~1.TXT").map_err(|e| e.message())?;
+    ensure!(alias == text.as_bytes(), "short-name alias reads different data");
+    Ok(())
+}
+
+fn fat_errors() -> TestResult {
+    use crate::fs::FsError;
+    ensure!(crate::fs::read_file("C:\\nope.txt").err() == Some(FsError::NotFound), "missing file not reported");
+    ensure!(crate::fs::read_file("C:\\MERIDIAN").err() == Some(FsError::IsADirectory), "directory read as a file");
+    ensure!(
+        crate::fs::list("C:\\MERIDIAN\\INIT.EXE").err() == Some(FsError::NotADirectory),
+        "file listed as a directory"
+    );
+    ensure!(crate::fs::read_file("Q:\\x").err() == Some(FsError::NoSuchVolume), "unknown drive accepted");
+    ensure!(crate::fs::read_file("no-drive").err() == Some(FsError::BadPath), "path without a drive accepted");
+    Ok(())
+}
+
+fn user_run_from_disk() -> TestResult {
+    let image = crate::fs::read_file("C:\\MERIDIAN\\INIT.EXE").map_err(|e| e.message())?;
+    let p = crate::ps::process::spawn("init-disk", &image, 0)?;
+    ensure!(p.terminated.wait(Some(10_000)) == WaitStatus::Signaled, "process did not exit");
+    ensure!(p.exit_status() == Some(0), "init loaded from disk failed: {:?}", p.exit_status());
     Ok(())
 }

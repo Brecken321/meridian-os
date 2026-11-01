@@ -180,6 +180,29 @@ objects, per-processor ready queues and load balancing.
   per-section protections, applies DIR64 relocations, sizes the stack;
   rejects images that need imports or TLS.
 
+## Storage (`drivers/ahci.rs`, `io/`, `fs/`)
+
+* **Read-only by design.** No block device has a write operation yet, so no
+  code path can modify a disk.
+* **AHCI**: per controller, BIOS/OS handoff, AHCI mode, interrupts off. Per
+  port with an ATA signature: stop, program the command list / FIS area /
+  command table (one page) and a 64 KiB DMA bounce buffer (below 4 GiB if
+  the controller lacks 64-bit addressing), start, IDENTIFY DEVICE. Reads use
+  READ DMA EXT in 64 KiB chunks on command slot 0, serialised by a
+  dispatcher mutex; completion is polled with timeouts and errors checked
+  via PxIS.TFES, PxTFD.ERR and the transferred byte count.
+* **Block layer** (`io/block.rs`): `BlockDevice` trait (name, sector size and
+  count, `read_sectors`), shared request validation, registries of disks and
+  partitions.
+* **Partitions** (`io/partition.rs`): GPT (bounded entry count, UTF-16
+  labels) with fallback to the four primary MBR entries.
+* **FAT32** (`fs/fat.rs`): validates the BPB, follows cluster chains with
+  cycle and range checks, decodes long file names (checksum verified) and
+  NT lower-case flags, looks up paths case-insensitively by long name or 8.3
+  alias, caches one FAT sector.
+* **Volumes** (`fs/mod.rs`): every recognised partition gets a drive letter
+  from `C:` in discovery order; paths use Windows syntax.
+
 ## Multiprocessor support (`arch/x86_64/smp.rs`, `ke/ipi.rs`)
 
 * **Startup**: the boot manager reserves a page below 1 MiB. The kernel

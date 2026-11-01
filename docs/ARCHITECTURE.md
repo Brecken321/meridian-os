@@ -112,8 +112,10 @@ produces; only the boot manager reads it.
 | `kernel/src/hal/` | ACPI, HPET, timer calibration, PCI, power, serial |
 | `kernel/src/ke/` | IRQL, per-processor control region, clock |
 | `kernel/src/mm/` | Physical allocator, paging, kernel virtual space, pool |
-| `kernel/src/drivers/` | Framebuffer console, PS/2 keyboard |
+| `kernel/src/drivers/` | Framebuffer console, PS/2 keyboard, AHCI SATA |
 | `kernel/src/ob/` | Object manager (handle tables) |
+| `kernel/src/io/` | Block devices and partition tables |
+| `kernel/src/fs/` | Volumes / drive letters and the FAT32 driver |
 | `kernel/src/ps/` | Processes, PE32+ loader, system call services |
 | `kernel/src/shell.rs` | Kernel debug shell |
 | `shared/abi/` | System call numbers and NTSTATUS codes (kernel â†” user) |
@@ -126,6 +128,6 @@ produces; only the boot manager reads it.
 
 Planned top-level directories as components arrive: `executive/` (if the
 executive is split out of the kernel crate), `wincompat/` (Win32 subsystem),
-`graphics/`, `desktop/`, `shell/`, `applications/`, `filesystem/`,
-`network/`, `audio/`, `sdk/`, `installer/`, `tests/` (host-side and
-application compatibility tests).
+`graphics/`, `desktop/`, `shell/`, `applications/`, `network/`, `audio/`,
+`sdk/`, `installer/`, `tests/` (host-side and application compatibility
+tests).

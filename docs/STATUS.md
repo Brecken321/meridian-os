@@ -46,17 +46,22 @@ the self tests or was verified manually in QEMU as noted.
   protections, DIR64 base relocations (images are loaded 256 MiB above their
   preferred base, so relocation is always exercised), stack sizing.
 * Native runtime (`runtime/rt`) and the first program `init.exe`
-  (`system/init`), loaded by the boot manager as a boot module and run at
-  every boot.
-* Kernel shell: help, ver, cpu, mem, acpi, pci, irq, threads, ps, run, uptime,
-  log, clear, selftest, reboot, shutdown, crash.
+  (`system/init`), read from `C:\MERIDIAN\INIT.EXE` and run at every boot
+  (the boot manager's copy is the fallback).
+* Storage (read-only by design): AHCI SATA driver (IDENTIFY, 48-bit DMA
+  reads through a 64 KiB bounce buffer, polled completion, BIOS/OS handoff),
+  GPT and MBR partition discovery, FAT32 file system with long file names,
+  short-name aliases and corruption checks, drive letters from `C:`.
+* Kernel shell: help, ver, cpu, mem, acpi, pci, irq, threads, ps, run, disks,
+  vol, dir, type, uptime, log, clear, selftest, reboot, shutdown, crash.
 * Build: reproducible GPT/FAT32 image writer, QEMU runner, self-test harness,
   screenshot capture, GitHub Actions CI.
 
 ## Not implemented yet
 
 Multi-threaded user processes, process creation from user mode, object
-namespace and access checks, PE imports/TLS, any storage driver, any filesystem, USB, networking, audio, GPU acceleration,
+namespace and access checks, PE imports/TLS, writing to disks, NVMe,
+NTFS, file access from user mode, any filesystem, USB, networking, audio, GPU acceleration,
 desktop, Windows compatibility, installer. See [ROADMAP.md](ROADMAP.md).
 
 ## Known limitations
@@ -65,9 +70,12 @@ desktop, Windows compatibility, installer. See [ROADMAP.md](ROADMAP.md).
   simple and correct but will contend on many-core machines. Per-processor
   queues are planned.
 * No thread affinity, wait-for-multiple-objects, APCs or priority boosting yet.
-* User processes have exactly one thread; user programs come from boot
-  modules (no filesystem yet); all user memory is committed up front (no
-  demand paging); programs must not import DLLs.
+* User processes have exactly one thread; all user memory is committed up
+  front (no demand paging); programs must not import DLLs; user programs
+  cannot open files yet (only the kernel reads the disk).
+* Storage is read-only and polled (no AHCI interrupts or command queuing);
+  only FAT32 is recognised, so the EFI system partition becomes `C:`;
+  optical drives are skipped.
 * Every TLB shootdown interrupts all other processors (no tracking of which
   processors might cache the address).
 * The direct map uses 2 MiB pages across all physical memory below the top of
@@ -105,8 +113,8 @@ None open. Fixed during bring-up (2026-10-31):
 
 ## Failed tests
 
-None. Latest local runs: 41/41 passed in 24 consecutive runs (12 debug,
-12 release, 4 vCPUs).
+None. Latest local runs: 48/48 passed (repeated debug and release runs,
+4 vCPUs).
 
 ## Real hardware tested
 

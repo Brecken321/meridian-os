@@ -35,6 +35,14 @@ impl PciDevice {
     pub fn vendor_name(&self) -> &'static str {
         vendor_name(self.vendor_id)
     }
+
+    /// Enables memory-space decoding and bus mastering (DMA) for the device.
+    pub fn enable_bus_mastering(&self) {
+        let reg = read32(self.bus, self.device, self.function, 0x04);
+        // Keep the command bits; write zeros to the status half (its bits
+        // are write-one-to-clear).
+        write32(self.bus, self.device, self.function, 0x04, (reg & 0xFFFF) | 0b110);
+    }
 }
 
 static CONFIG_LOCK: SpinLock<()> = SpinLock::new(());

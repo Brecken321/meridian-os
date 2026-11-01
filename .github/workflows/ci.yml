@@ -32,8 +32,10 @@ jobs:
       - name: Boot screenshot
         run: python3 tools/mbuild.py screenshot --release
 
-      - name: Keyboard, shell, user processes and ACPI power-off
-        run: python3 tools/mbuild.py exec help ps "run init 1" "run init" shutdown --release --expect-poweroff
+      - name: Keyboard, shell, disk, user processes and ACPI power-off
+        run: |
+          python3 tools/mbuild.py exec help ps "run init 1" 'dir C:\MERIDIAN' \
+            'type "C:\Welcome to Meridian.txt"' 'run C:\MERIDIAN\INIT.EXE' shutdown --release --expect-poweroff
 
       - name: Upload logs, screenshot and disk image
         if: always()

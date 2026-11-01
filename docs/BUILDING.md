@@ -83,6 +83,8 @@ GPT disk, 48 MiB, one EFI System Partition (FAT32) starting at LBA 2048:
 EFI/BOOT/BOOTX64.EFI   Meridian Boot Manager
 MERIDIAN/KERNEL.ELF    kernel
 MERIDIAN/CMDLINE.TXT   kernel command line
+MERIDIAN/INIT.EXE      first user-mode program (PE32+)
+Welcome to Meridian.txt  (long file name; read it with `type`)
 ```
 
 The image is reproducible (fixed GUIDs and timestamps). Writing it to a USB
