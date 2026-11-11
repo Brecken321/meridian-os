@@ -460,8 +460,11 @@ def cmd_build(args) -> int:
 
 RUN_HELP = """
 Meridian OS is starting in a QEMU window; the desktop appears in a few seconds.
-  * Use the mouse and keyboard in that window as on any PC: the Start button,
-    File Explorer, Terminal, Task Manager, Settings and Notepad all work.
+  * Use the mouse and keyboard in that window as on any PC. Open Start (the
+    Windows key) for File Explorer, Notepad, Paint, Calculator, Photos, Clock,
+    Terminal, Task Manager, Settings, Minesweeper and 2048.
+  * Your files and settings are saved on drive D: (build\data.img), which is
+    kept between runs.
   * If the window ever captures the mouse, press Ctrl+Alt+G to release it.
   * The kernel log appears below, and you can type kernel shell commands here.
   * Start > Power > Shut down (or closing the window) stops Meridian.
