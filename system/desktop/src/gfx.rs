@@ -132,6 +132,7 @@ pub mod math {
     }
 }
 
+#[derive(Clone)]
 pub struct Canvas {
     pub w: i32,
     pub h: i32,
@@ -345,9 +346,97 @@ impl Canvas {
         }
     }
 
+    /// Draws `src` scaled into `dst` (nearest neighbour; opaque).
+    pub fn blit_scaled(&mut self, src: &Canvas, dst: Rect) {
+        let Some(vis) = dst.intersect(&self.clip) else { return };
+        if src.w <= 0 || src.h <= 0 {
+            return;
+        }
+        for y in vis.y..vis.bottom() {
+            let sy = ((y - dst.y) as i64 * src.h as i64 / dst.h.max(1) as i64) as i32;
+            let row = (sy.clamp(0, src.h - 1) * src.w) as usize;
+            for x in vis.x..vis.right() {
+                let sx = ((x - dst.x) as i64 * src.w as i64 / dst.w.max(1) as i64) as i32;
+                self.px[(y * self.w + x) as usize] = src.px[row + sx.clamp(0, src.w - 1) as usize] | 0xFF00_0000;
+            }
+        }
+    }
+
+    /// A heavily blurred copy (for frosted "Mica" surfaces): averaged down
+    /// by `factor`, box-blurred three times, and scaled back up smoothly.
+    pub fn blurred(&self, factor: i32) -> Canvas {
+        let (sw, sh) = ((self.w / factor).max(1), (self.h / factor).max(1));
+        let mut small = Canvas::new(sw, sh, 0);
+        for sy in 0..sh {
+            for sx in 0..sw {
+                let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+                for y in (sy * factor..((sy + 1) * factor).min(self.h)).step_by(2) {
+                    for x in (sx * factor..((sx + 1) * factor).min(self.w)).step_by(2) {
+                        let p = self.px[(y * self.w + x) as usize];
+                        r += p >> 16 & 0xFF;
+                        g += p >> 8 & 0xFF;
+                        b += p & 0xFF;
+                        n += 1;
+                    }
+                }
+                let n = n.max(1);
+                small.px[(sy * sw + sx) as usize] = rgb(r / n, g / n, b / n);
+            }
+        }
+        for _ in 0..3 {
+            small.box_blur(3);
+        }
+        let mut out = Canvas::new(self.w, self.h, 0);
+        for y in 0..self.h {
+            let fy = (y as f32 + 0.5) / factor as f32 - 0.5;
+            let y0 = (math::floor(fy) as i32).clamp(0, sh - 1);
+            let y1 = (y0 + 1).min(sh - 1);
+            let ty = ((fy - y0 as f32).clamp(0.0, 1.0) * 255.0) as u32;
+            for x in 0..self.w {
+                let fx = (x as f32 + 0.5) / factor as f32 - 0.5;
+                let x0 = (math::floor(fx) as i32).clamp(0, sw - 1);
+                let x1 = (x0 + 1).min(sw - 1);
+                let tx = ((fx - x0 as f32).clamp(0.0, 1.0) * 255.0) as u32;
+                let a = lerp(small.px[(y0 * sw + x0) as usize], small.px[(y0 * sw + x1) as usize], tx);
+                let b = lerp(small.px[(y1 * sw + x0) as usize], small.px[(y1 * sw + x1) as usize], tx);
+                out.px[(y * self.w + x) as usize] = lerp(a, b, ty) | 0xFF00_0000;
+            }
+        }
+        out
+    }
+
+    fn box_blur(&mut self, radius: i32) {
+        let (w, h) = (self.w, self.h);
+        let mut tmp = self.px.clone();
+        for pass in 0..2 {
+            let (outer, inner) = if pass == 0 { (h, w) } else { (w, h) };
+            for o in 0..outer {
+                for i in 0..inner {
+                    let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+                    for k in (i - radius).max(0)..=(i + radius).min(inner - 1) {
+                        let idx = if pass == 0 { o * w + k } else { k * w + o };
+                        let p = self.px[idx as usize];
+                        r += p >> 16 & 0xFF;
+                        g += p >> 8 & 0xFF;
+                        b += p & 0xFF;
+                        n += 1;
+                    }
+                    let idx = if pass == 0 { o * w + i } else { i * w + o };
+                    tmp[idx as usize] = rgb(r / n, g / n, b / n);
+                }
+            }
+            core::mem::swap(&mut self.px, &mut tmp);
+        }
+    }
+
     /// Makes the pixels outside a rounded rectangle of this canvas's size
     /// transparent (anti-aliased), for rounded window corners.
     pub fn round_corners(&mut self, radius: i32) {
+        self.round_corners_sides(radius, true, true);
+    }
+
+    /// Like `round_corners`, for the top and/or bottom corners only.
+    pub fn round_corners_sides(&mut self, radius: i32, top: bool, bottom: bool) {
         let rf = radius as f32;
         for dy in 0..radius {
             for dx in 0..radius {
@@ -355,10 +444,13 @@ impl Canvas {
                 let fy = rf - dy as f32 - 0.5;
                 let cov = (rf - math::sqrt(fx * fx + fy * fy) + 0.5).clamp(0.0, 1.0);
                 let a = (cov * 255.0) as u32;
-                for (x, y) in
-                    [(dx, dy), (self.w - 1 - dx, dy), (dx, self.h - 1 - dy), (self.w - 1 - dx, self.h - 1 - dy)]
-                {
-                    if x >= 0 && y >= 0 && x < self.w && y < self.h {
+                for (x, y, is_top) in [
+                    (dx, dy, true),
+                    (self.w - 1 - dx, dy, true),
+                    (dx, self.h - 1 - dy, false),
+                    (self.w - 1 - dx, self.h - 1 - dy, false),
+                ] {
+                    if (if is_top { top } else { bottom }) && x >= 0 && y >= 0 && x < self.w && y < self.h {
                         let i = (y * self.w + x) as usize;
                         self.px[i] = with_alpha(self.px[i], a.min(self.px[i] >> 24));
                     }

@@ -87,6 +87,10 @@ const TESTS: &[Test] = &[
     Test { name: "fat.file_matches_boot_module", run: fat_file_matches_module },
     Test { name: "fat.long_file_name", run: fat_long_file_name },
     Test { name: "fat.errors", run: fat_errors },
+    Test { name: "fat.write_read_back", run: fat_write_read_back },
+    Test { name: "fat.rename_move_delete", run: fat_rename_move_delete },
+    Test { name: "fat.directory_growth", run: fat_directory_growth },
+    Test { name: "fat.write_protection", run: fat_write_protection },
     Test { name: "user.run_from_disk", run: user_run_from_disk },
 ];
 
@@ -307,12 +311,14 @@ fn apic_self_ipi() -> TestResult {
 fn clock_ticks() -> TestResult {
     let t0 = clock::ticks();
     let u0 = clock::uptime_us();
-    clock::busy_wait_us(50_000);
+    clock::busy_wait_us(200_000);
     let dt = clock::ticks() - t0;
     let du = clock::uptime_us() - u0;
-    ensure!(du >= 50_000, "uptime advanced only {du} us");
-    // Emulators can deliver ticks late; require a sane range, not precision.
-    ensure!((10..=500).contains(&dt), "{dt} clock ticks in 50 ms (expected ~50)");
+    ensure!(du >= 200_000, "uptime advanced only {du} us");
+    // Emulators can deliver ticks late: QEMU on a Windows host fires its
+    // timers at the host's timer resolution, 15.6 ms by default, so only
+    // ~13 of the 200 ticks may arrive. Require a sane range, not precision.
+    ensure!((8..=2000).contains(&dt), "{dt} clock ticks in 200 ms (expected 13 to 200)");
     Ok(())
 }
 
@@ -830,6 +836,129 @@ fn fat_errors() -> TestResult {
     );
     ensure!(crate::fs::read_file("Q:\\x").err() == Some(FsError::NoSuchVolume), "unknown drive accepted");
     ensure!(crate::fs::read_file("no-drive").err() == Some(FsError::BadPath), "path without a drive accepted");
+    Ok(())
+}
+
+/// The writable test drive (the data disk attached by `mbuild.py test`).
+fn writable_volume() -> Result<Arc<crate::fs::Volume>, String> {
+    crate::fs::volumes()
+        .into_iter()
+        .find(|v| v.fs.writable())
+        .ok_or_else(|| String::from("no writable volume (is the data disk attached?)"))
+}
+
+fn pattern(len: usize, seed: u8) -> Vec<u8> {
+    (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+}
+
+fn fat_write_read_back() -> TestResult {
+    use crate::fs;
+    let v = writable_volume()?;
+    let d = v.letter;
+    let free_before = v.fs.free_bytes();
+    let dir = format!("{d}:\\SelfTest1");
+    fs::create_dir(&dir).map_err(|e| e.message())?;
+    ensure!(fs::create_dir(&dir).err() == Some(fs::FsError::AlreadyExists), "duplicate folder accepted");
+    for (name, len) in [("short.txt", 5usize), ("A long file name, with spaces.dat", 70_000), ("EMPTY.BIN", 0)] {
+        let path = format!("{dir}\\{name}");
+        let data = pattern(len, len as u8);
+        fs::write_file(&path, &data).map_err(|e| format!("write {name}: {}", e.message()))?;
+        let back = fs::read_file(&path).map_err(|e| format!("read {name}: {}", e.message()))?;
+        ensure!(back == data, "{name}: read back {} bytes that differ from the {} written", back.len(), data.len());
+    }
+    // Replace a file with shorter contents; names keep their case.
+    let long = format!("{dir}\\A long file name, with spaces.dat");
+    fs::write_file(&long, b"shorter").map_err(|e| e.message())?;
+    ensure!(fs::read_file(&long).map_err(|e| e.message())? == b"shorter", "overwrite not visible");
+    let names: Vec<String> = fs::list(&dir).map_err(|e| e.message())?.into_iter().map(|e| e.name).collect();
+    ensure!(names.iter().any(|n| n == "short.txt"), "lower-case 8.3 name lost its case: {names:?}");
+    ensure!(names.iter().any(|n| n == "A long file name, with spaces.dat"), "long name missing: {names:?}");
+    for name in ["short.txt", "A long file name, with spaces.dat", "EMPTY.BIN"] {
+        fs::delete(&format!("{dir}\\{name}")).map_err(|e| e.message())?;
+    }
+    fs::delete(&dir).map_err(|e| e.message())?;
+    ensure!(fs::metadata(&dir).err() == Some(fs::FsError::NotFound), "deleted folder still present");
+    ensure!(v.fs.free_bytes() == free_before, "free space {} != {} before the test", v.fs.free_bytes(), free_before);
+    Ok(())
+}
+
+fn fat_rename_move_delete() -> TestResult {
+    use crate::fs::{self, FsError};
+    let v = writable_volume()?;
+    let d = v.letter;
+    let free_before = v.fs.free_bytes();
+    let (a, b) = (format!("{d}:\\SelfTestA"), format!("{d}:\\SelfTestA\\Inner folder"));
+    fs::create_dir(&a).map_err(|e| e.message())?;
+    fs::create_dir(&b).map_err(|e| e.message())?;
+    let data = pattern(3000, 7);
+    fs::write_file(&format!("{a}\\report.txt"), &data).map_err(|e| e.message())?;
+    // Rename in place, then a case-only rename, then a move into a subfolder.
+    fs::rename(&format!("{a}\\report.txt"), &format!("{a}\\Final report.txt")).map_err(|e| e.message())?;
+    ensure!(fs::read_file(&format!("{a}\\report.txt")).err() == Some(FsError::NotFound), "old name survived");
+    fs::rename(&format!("{a}\\Final report.txt"), &format!("{a}\\FINAL REPORT.txt")).map_err(|e| e.message())?;
+    let names: Vec<String> = fs::list(&a).map_err(|e| e.message())?.into_iter().map(|e| e.name).collect();
+    ensure!(names.iter().any(|n| n == "FINAL REPORT.txt"), "case-only rename not applied: {names:?}");
+    fs::rename(&format!("{a}\\FINAL REPORT.txt"), &format!("{b}\\moved.txt")).map_err(|e| e.message())?;
+    ensure!(fs::read_file(&format!("{b}\\moved.txt")).map_err(|e| e.message())? == data, "moved file differs");
+    // Move a folder up a level and check its ".." follows.
+    let c = format!("{d}:\\SelfTestInner");
+    fs::rename(&b, &c).map_err(|e| e.message())?;
+    ensure!(fs::read_file(&format!("{c}\\moved.txt")).map_err(|e| e.message())? == data, "file lost in folder move");
+    ensure!(fs::rename(&a, &format!("{a}\\x")).is_err(), "folder moved into itself");
+    ensure!(fs::delete(&c).err() == Some(FsError::NotEmpty), "non-empty folder deleted");
+    ensure!(fs::rename(&c, &a).err() == Some(FsError::AlreadyExists), "rename over an existing folder");
+    fs::delete(&format!("{c}\\moved.txt")).map_err(|e| e.message())?;
+    fs::delete(&c).map_err(|e| e.message())?;
+    fs::delete(&a).map_err(|e| e.message())?;
+    ensure!(v.fs.free_bytes() == free_before, "free space {} != {} before the test", v.fs.free_bytes(), free_before);
+    Ok(())
+}
+
+fn fat_directory_growth() -> TestResult {
+    use crate::fs;
+    let v = writable_volume()?;
+    let dir = format!("{}:\\SelfTestMany", v.letter);
+    fs::create_dir(&dir).map_err(|e| e.message())?;
+    // Long names take several 32-byte entries each, so 60 of them grow the
+    // folder across many clusters.
+    for i in 0..60 {
+        let path = format!("{dir}\\Document number {i:03} with a long name.txt");
+        fs::write_file(&path, format!("file {i}").as_bytes()).map_err(|e| format!("file {i}: {}", e.message()))?;
+    }
+    let list = fs::list(&dir).map_err(|e| e.message())?;
+    ensure!(list.len() == 60, "listed {} of 60 files", list.len());
+    for i in (0..60).step_by(7) {
+        let path = format!("{dir}\\document NUMBER {i:03} with a long name.txt");
+        let data = fs::read_file(&path).map_err(|e| format!("read {i}: {}", e.message()))?;
+        ensure!(data == format!("file {i}").as_bytes(), "file {i} has the wrong contents");
+    }
+    let shorts: Vec<String> = list.iter().map(|e| e.short_name.clone()).collect();
+    for (i, s) in shorts.iter().enumerate() {
+        ensure!(!shorts[i + 1..].contains(s), "duplicate 8.3 alias {s}");
+    }
+    for e in list {
+        fs::delete(&format!("{dir}\\{}", e.name)).map_err(|e| e.message())?;
+    }
+    fs::delete(&dir).map_err(|e| e.message())?;
+    Ok(())
+}
+
+fn fat_write_protection() -> TestResult {
+    use crate::fs::{self, FsError};
+    let v = writable_volume()?;
+    // The boot disk is not a Meridian data partition: every write is refused.
+    ensure!(fs::write_file("C:\\x.txt", b"x").err() == Some(FsError::ReadOnly), "boot disk accepted a write");
+    ensure!(fs::create_dir("C:\\X").err() == Some(FsError::ReadOnly), "boot disk accepted a folder");
+    ensure!(fs::delete("C:\\Welcome to Meridian.txt").err() == Some(FsError::ReadOnly), "boot disk deletion");
+    let d = v.letter;
+    for bad in ["a:b.txt", "what?.txt", "trailing.", "", "x\\"] {
+        let r = fs::write_file(&format!("{d}:\\{bad}"), b"x");
+        ensure!(r.is_err(), "invalid name {bad:?} accepted");
+    }
+    ensure!(
+        fs::rename(&format!("{d}:\\Documents"), "C:\\Documents").err() == Some(FsError::NotSameDrive),
+        "cross-drive"
+    );
     Ok(())
 }
 

@@ -1,4 +1,8 @@
 //! Block devices: anything that reads fixed-size sectors (disks, partitions).
+//!
+//! Writing is opt-in per device: only partitions that carry Meridian's own
+//! data-partition type GUID accept writes (see `io::partition`), so nothing
+//! Meridian does can modify a disk prepared by another operating system.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -16,6 +20,8 @@ pub enum IoError {
     DeviceError,
     /// The device did not complete the request in time.
     Timeout,
+    /// The device (or partition) does not accept writes.
+    ReadOnly,
 }
 
 pub trait BlockDevice: Send + Sync {
@@ -28,12 +34,27 @@ pub trait BlockDevice: Send + Sync {
     /// Reads `buf.len() / sector_size()` sectors starting at `lba`.
     fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> Result<(), IoError>;
 
+    /// True if `write_sectors` may succeed.
+    fn writable(&self) -> bool {
+        false
+    }
+
+    /// Writes `buf.len() / sector_size()` sectors starting at `lba`.
+    fn write_sectors(&self, _lba: u64, _buf: &[u8]) -> Result<(), IoError> {
+        Err(IoError::ReadOnly)
+    }
+
+    /// Makes previous writes durable (flushes the device's write cache).
+    fn flush(&self) -> Result<(), IoError> {
+        Ok(())
+    }
+
     fn size_bytes(&self) -> u64 {
         self.sector_count() * self.sector_size() as u64
     }
 }
 
-/// Validates a read request against a device's geometry.
+/// Validates a read or write request against a device's geometry.
 pub fn check_request(dev: &dyn BlockDevice, lba: u64, len: usize) -> Result<u64, IoError> {
     let ss = dev.sector_size();
     if len == 0 || len % ss != 0 {

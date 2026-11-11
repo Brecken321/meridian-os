@@ -6,7 +6,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::{Handle, service, status, syscall};
-pub use meridian_abi::{DisplayInfo, InputEvent, ProcessInfo, ThreadInfo, WallTime, dir_record, input, key, power};
+pub use meridian_abi::{
+    DisplayInfo, InputEvent, ProcessInfo, ThreadInfo, VolumeInfo, WallTime, dir_record, input, key, power, volume_flags,
+};
 
 fn check(r: i64) -> Result<i64, i64> {
     if status::is_error(r) { Err(r) } else { Ok(r) }
@@ -115,6 +117,42 @@ pub fn query_processes() -> Vec<ProcessInfo> {
     let mut out = vec![ProcessInfo::default(); 128];
     let size = core::mem::size_of_val(out.as_slice()) as u64;
     let n = syscall(service::QUERY_PROCESSES, out.as_mut_ptr() as u64, size, 0, 0).max(0) as usize;
+    out.truncate(n);
+    out
+}
+
+/// Creates `path` with `data`, replacing it if it exists.
+pub fn write_file(path: &str, data: &[u8]) -> Result<(), i64> {
+    check(syscall(
+        service::WRITE_FILE,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        data.as_ptr() as u64,
+        data.len() as u64,
+    ))
+    .map(|_| ())
+}
+
+pub fn create_directory(path: &str) -> Result<(), i64> {
+    check(syscall(service::CREATE_DIRECTORY, path.as_ptr() as u64, path.len() as u64, 0, 0)).map(|_| ())
+}
+
+/// Deletes a file or an empty folder.
+pub fn delete_file(path: &str) -> Result<(), i64> {
+    check(syscall(service::DELETE_FILE, path.as_ptr() as u64, path.len() as u64, 0, 0)).map(|_| ())
+}
+
+/// Renames or moves a file or folder within one drive.
+pub fn rename(from: &str, to: &str) -> Result<(), i64> {
+    check(syscall(service::RENAME, from.as_ptr() as u64, from.len() as u64, to.as_ptr() as u64, to.len() as u64))
+        .map(|_| ())
+}
+
+/// Mounted drives.
+pub fn query_volumes() -> Vec<VolumeInfo> {
+    let mut out = vec![VolumeInfo::default(); 26];
+    let size = core::mem::size_of_val(out.as_slice()) as u64;
+    let n = syscall(service::QUERY_VOLUMES, out.as_mut_ptr() as u64, size, 0, 0).max(0) as usize;
     out.truncate(n);
     out
 }

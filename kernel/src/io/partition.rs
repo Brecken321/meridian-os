@@ -16,6 +16,13 @@ pub const ESP_TYPE: [u8; 16] =
 pub const BASIC_DATA_TYPE: [u8; 16] =
     [0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7];
 
+/// Meridian data partition (7A3E9C42-5B1D-4E8F-9A6C-3D2B1F0E8C57), a type
+/// GUID chosen for Meridian. It is the only partition type Meridian writes
+/// to: no other operating system creates it, so existing disks are never
+/// modified.
+pub const MERIDIAN_DATA_TYPE: [u8; 16] =
+    [0x42, 0x9C, 0x3E, 0x7A, 0x1D, 0x5B, 0x8F, 0x4E, 0x9A, 0x6C, 0x3D, 0x2B, 0x1F, 0x0E, 0x8C, 0x57];
+
 const MAX_GPT_ENTRIES: u32 = 256;
 
 pub struct Partition {
@@ -33,8 +40,14 @@ impl Partition {
         self.type_guid == ESP_TYPE || self.mbr_type == 0xEF
     }
 
+    pub fn is_meridian_data(&self) -> bool {
+        self.type_guid == MERIDIAN_DATA_TYPE
+    }
+
     fn kind(&self) -> &'static str {
-        if self.is_esp() {
+        if self.is_meridian_data() {
+            "Meridian data partition"
+        } else if self.is_esp() {
             "EFI system partition"
         } else if self.type_guid == BASIC_DATA_TYPE || matches!(self.mbr_type, 0x07 | 0x0B | 0x0C) {
             "basic data partition"
@@ -64,6 +77,22 @@ impl BlockDevice for Partition {
     fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> Result<(), IoError> {
         block::check_request(self, lba, buf.len())?;
         self.disk.read_sectors(self.first_lba + lba, buf)
+    }
+
+    fn writable(&self) -> bool {
+        self.is_meridian_data() && self.disk.writable()
+    }
+
+    fn write_sectors(&self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
+        if !self.writable() {
+            return Err(IoError::ReadOnly);
+        }
+        block::check_request(self, lba, buf.len())?;
+        self.disk.write_sectors(self.first_lba + lba, buf)
+    }
+
+    fn flush(&self) -> Result<(), IoError> {
+        if self.writable() { self.disk.flush() } else { Ok(()) }
     }
 }
 

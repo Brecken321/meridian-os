@@ -46,6 +46,13 @@ ESP_TYPE = uuid.UUID("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
 # Fixed GUIDs and timestamps keep the image byte-for-byte reproducible.
 DISK_GUID = uuid.uuid5(uuid.NAMESPACE_URL, "https://github.com/Brecken321/meridian-os/disk")
 PART_GUID = uuid.uuid5(uuid.NAMESPACE_URL, "https://github.com/Brecken321/meridian-os/esp")
+# The data disk (D:): a GPT disk with one Meridian data partition, the only
+# partition type the kernel will write to. build/data.img keeps your files
+# between runs; automated commands use a fresh build/<command>-data.img.
+DATA_SIZE = 64 * 1024 * 1024
+DATA_TYPE = uuid.UUID("7A3E9C42-5B1D-4E8F-9A6C-3D2B1F0E8C57")
+DATA_DISK_GUID = uuid.uuid5(uuid.NAMESPACE_URL, "https://github.com/Brecken321/meridian-os/data-disk")
+DATA_PART_GUID = uuid.uuid5(uuid.NAMESPACE_URL, "https://github.com/Brecken321/meridian-os/data")
 QEMU_EXIT_SUCCESS = (0x10 << 1) | 1
 QEMU_EXIT_FAILURE = (0x11 << 1) | 1
 BOOT_MARKER = "boot: kernel initialised"
@@ -69,6 +76,7 @@ USER_LINK_FLAGS = [
 
 QUIET = False
 IMAGE = "meridian.img"  # disk image inside build/ for this command (see main)
+DATA_IMAGE = "data.img"  # its data disk (D:)
 
 
 def show(*parts) -> None:
@@ -273,21 +281,22 @@ class Fat32:
         return bytes(reserved) + bytes(fat) * self.FATS + bytes(self.data)
 
 
-def gpt_image(partition: bytes, disk_size: int) -> bytes:
+def gpt_image(partition: bytes, disk_size: int, type_guid: uuid.UUID = ESP_TYPE, part_guid: uuid.UUID = PART_GUID,
+              disk_guid: uuid.UUID = DISK_GUID, part_name: str = "EFI System Partition") -> bytes:
     disk_sectors = disk_size // SECTOR
     part_sectors = len(partition) // SECTOR
     last_usable = disk_sectors - 34
     part_end = PARTITION_START + part_sectors - 1
     assert part_end <= last_usable
 
-    name = "EFI System Partition".encode("utf-16-le").ljust(72, b"\0")
-    entry = struct.pack("<16s16sQQQ72s", ESP_TYPE.bytes_le, PART_GUID.bytes_le, PARTITION_START, part_end, 0, name)
+    name = part_name.encode("utf-16-le").ljust(72, b"\0")
+    entry = struct.pack("<16s16sQQQ72s", type_guid.bytes_le, part_guid.bytes_le, PARTITION_START, part_end, 0, name)
     entries = entry.ljust(128 * 128, b"\0")
     entries_crc = zlib.crc32(entries)
 
     def header(my_lba: int, alt_lba: int, entries_lba: int) -> bytes:
         fields = [b"EFI PART", 0x00010000, 92, 0, 0, my_lba, alt_lba, 34, last_usable,
-                  DISK_GUID.bytes_le, entries_lba, 128, 128, entries_crc]
+                  disk_guid.bytes_le, entries_lba, 128, 128, entries_crc]
         raw = struct.pack("<8sIIIIQQQQ16sQIII", *fields)
         fields[3] = zlib.crc32(raw)
         return struct.pack("<8sIIIIQQQQ16sQIII", *fields).ljust(SECTOR, b"\0")
@@ -331,6 +340,31 @@ console), "help" lists the kernel commands: threads, cpu, mem, disks, vol...
 
 Meridian is early, honest work in progress: see docs/STATUS.md.
 """
+
+
+DATA_README = """This is drive D:, Meridian's data drive.
+
+Unlike C: (the read-only boot disk), you can save here: Notepad documents,
+Paint pictures and anything you create or copy in File Explorer. Settings
+are kept in D:\\Meridian\\settings.ini.
+
+The drive is the file build\\data.img on your PC. It survives restarts and
+rebuilds; delete that file to start over with an empty drive.
+"""
+
+
+def make_data_image(out: Path) -> None:
+    tree = {
+        "Documents": {"About this drive.txt": DATA_README.encode("utf-8")},
+        "Pictures": {},
+        "Desktop": {},
+    }
+    part_sectors = DATA_SIZE // SECTOR - PARTITION_START - 34
+    fs = Fat32(part_sectors, "DATA")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(gpt_image(fs.build(tree, PARTITION_START), DATA_SIZE, DATA_TYPE, DATA_PART_GUID, DATA_DISK_GUID,
+                              "Meridian Data"))
+    show(f"wrote {out.relative_to(ROOT)} (empty data drive D:)")
 
 
 def make_image(boot: Path, kernel: Path, programs: dict[str, Path], cmdline: str, out: Path) -> None:
@@ -395,6 +429,7 @@ def qemu_command(args, headless: bool, extra: list[str]) -> list[str]:
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
         "-drive", f"if=pflash,format=raw,unit=1,file={vars_copy.name}",
         "-drive", f"format=raw,file={IMAGE}",
+        "-drive", f"format=raw,file={DATA_IMAGE}",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
         "-rtc", "base=localtime",
     ]
@@ -409,6 +444,9 @@ def qemu_command(args, headless: bool, extra: list[str]) -> list[str]:
 def prepare(args, cmdline: str) -> None:
     boot, kernel, programs = cargo_build(args.release)
     make_image(boot, kernel, programs, cmdline.strip(), BUILD / IMAGE)
+    data = BUILD / DATA_IMAGE
+    if DATA_IMAGE != "data.img" or not data.exists():
+        make_data_image(data)
 
 
 def cmd_build(args) -> int:
@@ -469,7 +507,7 @@ def cmd_test(args) -> int:
     results = [line for line in text.splitlines() if line.startswith("[selftest]")]
     for line in results:
         print(line)
-    passed = code == QEMU_EXIT_SUCCESS and "SELFTEST: ALL PASSED" in text
+    passed = code == QEMU_EXIT_SUCCESS and "SELFTEST: ALL PASSED" in text and not fat_errors(BUILD / DATA_IMAGE)
     if not passed:
         print("\n---- last 60 lines of the serial log ----")
         print("\n".join(text.splitlines()[-60:]))
@@ -528,8 +566,11 @@ def cmd_screenshot(args) -> int:
 
 
 QCODES = {" ": "spc", "\n": "ret", "-": "minus", "=": "equal", ".": "dot", "/": "slash", ",": "comma",
-          "\\": "backslash", ";": "semicolon", "'": "apostrophe"}
-SHIFTED = {":": "semicolon", '"': "apostrophe", "_": "minus", "~": "grave_accent", "!": "1"}
+          "\\": "backslash", ";": "semicolon", "'": "apostrophe", "[": "bracket_left", "]": "bracket_right",
+          "`": "grave_accent"}
+SHIFTED = {":": "semicolon", '"': "apostrophe", "_": "minus", "~": "grave_accent", "!": "1", "@": "2", "#": "3",
+           "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0", "+": "equal", ">": "dot",
+           "<": "comma", "?": "slash", "|": "backslash", "{": "bracket_left", "}": "bracket_right"}
 
 
 def key_events(text: str) -> list[dict]:
@@ -552,19 +593,30 @@ def key_events(text: str) -> list[dict]:
 # Coordinates are for the default 1280x800 screen.
 UI_STEPS = [
     "shot desktop",
-    "click 520 776", "wait 0.5", "shot start-menu",
-    "type task", "wait 0.3", "shot start-search",
+    "click 472 776", "wait 0.6", "shot start-menu",
+    "type task", "wait 0.4", "shot start-search",
     "key ret", "wait 1.5", "shot task-manager",
-    "click 337 115", "wait 3", "shot performance",
-    "dclick 56 158", "wait 1", "shot welcome-file",
-    "click 568 776", "wait 1", "click 262 254", "wait 1", "shot explorer",
-    "key meta_l", "wait 0.5", "key esc", "wait 0.3",
-    "click 616 776", "wait 1", r"type dir C:\\MERIDIAN\n", "wait 1", "shot terminal",
-    "key alt+f4", "wait 0.5",
-    "click 712 776", "wait 1", "click 879 290", "wait 1.5", "shot light-mode",
-    "dclick 538 171", "wait 1", "shot maximized",
-    "click 520 776", "wait 0.5", "click 900 704", "wait 0.5", "shot power-menu",
-    "click 830 608", "wait 3",
+    "key alt+f4", "wait 0.4",
+    "key meta_l", "wait 0.3", "type notepad", "key ret", "wait 1.2",
+    r"type Saved by the Meridian UI test.\n", "key ctrl+s", "wait 0.6", "shot save-as",
+    "key ret", "wait 1", "shot saved",
+    "key alt+f4", "wait 0.4",
+    "key meta_l+e", "wait 1.2", "shot explorer",
+    "key alt+f4", "wait 0.4",
+    "key meta_l+r", "wait 1", r"type dir D:\\Documents\n", "wait 1", "shot terminal",
+    "key alt+f4", "wait 0.4",
+    "key meta_l", "wait 0.3", "type calc", "key ret", "wait 1", "type 12*12=", "wait 0.5", "shot calculator",
+    "key alt+f4", "wait 0.4",
+    "key meta_l", "wait 0.3", "type paint", "key ret", "wait 1.5", "drag 300 250 700 450", "wait 0.5",
+    "key ctrl+s", "wait 0.6", "key ret", "wait 1.5", "shot paint",
+    "key alt+f4", "wait 0.4",
+    "key meta_l", "wait 0.3", "type photos", "key ret", "wait 1.5", "shot photos",
+    "key alt+f4", "wait 0.4",
+    "click 1210 776", "wait 0.6", "shot calendar", "key esc", "wait 0.3",
+    "rclick 700 300", "wait 0.5", "shot desktop-menu", "key esc", "wait 0.3",
+    "key meta_l+l", "wait 1", "shot lock", "key ret", "wait 0.6",
+    "click 472 776", "wait 0.6", "click 920 704", "wait 0.6", "shot power-menu",
+    "click 848 652", "wait 3",
 ]
 
 
@@ -655,6 +707,16 @@ def ui_commands(action: str, pointer: Pointer) -> list[dict]:
     raise ValueError(f"unknown ui action {action!r}")
 
 
+def fat_errors(image: Path) -> list[str]:
+    """Independent check of the data drive the guest wrote to."""
+    import fatcheck
+    errors = fatcheck.check(str(image))
+    for e in errors:
+        print("fatcheck:", e)
+    print(f"fatcheck: {image.relative_to(ROOT)}: " + ("consistent" if not errors else f"{len(errors)} error(s)"))
+    return errors
+
+
 def cmd_ui(args) -> int:
     """Boots the desktop headless and drives it with the virtual mouse and
     keyboard, saving a screenshot at every `shot NAME` to build/ui/. Actions:
@@ -722,6 +784,9 @@ def cmd_ui(args) -> int:
         return 1
     if args.expect_poweroff and not powered_off:
         print("UI TEST FAILED: the guest did not power off")
+        return 1
+    if fat_errors(BUILD / DATA_IMAGE):
+        print("UI TEST FAILED: the data drive is inconsistent")
         return 1
     print(f"UI test finished: {count} screenshot(s) in build/ui/")
     return 0
@@ -855,8 +920,18 @@ def cmd_demo(args) -> int:
 
 
 def cmd_clean(_args) -> int:
-    shutil.rmtree(BUILD, ignore_errors=True)
+    keep = BUILD / "data.img"
+    if BUILD.exists():
+        for p in BUILD.iterdir():
+            if p == keep:
+                continue
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
     subprocess.run(["cargo", "clean"], cwd=ROOT, check=False)
+    if keep.exists():
+        print(f"kept {keep.relative_to(ROOT)} (your files on drive D:); delete it to start over")
     return 0
 
 
@@ -879,9 +954,11 @@ def main() -> int:
     parser.add_argument("--settle", type=float, default=1.0, help="screenshot: seconds to wait after boot")
     parser.add_argument("--out", default=str(BUILD / "screenshot.png"), help="screenshot output file")
     args = parser.parse_args()
-    global QUIET, IMAGE
+    global QUIET, IMAGE, DATA_IMAGE
     QUIET = args.quiet
-    IMAGE = "meridian.img" if args.command in ("build", "run", "demo") else f"{args.command}.img"
+    interactive = args.command in ("build", "run", "demo")
+    IMAGE = "meridian.img" if interactive else f"{args.command}.img"
+    DATA_IMAGE = "data.img" if interactive else f"{args.command}-data.img"
     BUILD.mkdir(exist_ok=True)
     return {"build": cmd_build, "run": cmd_run, "test": cmd_test, "screenshot": cmd_screenshot,
             "exec": cmd_exec, "ui": cmd_ui, "demo": cmd_demo, "clean": cmd_clean}[args.command](args)

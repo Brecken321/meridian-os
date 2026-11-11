@@ -49,23 +49,59 @@ impl Theme {
     pub fn selection(&self) -> Color {
         with_alpha(self.accent, if self.dark { 90 } else { 60 })
     }
-    pub fn title(&self, focused: bool) -> Color {
-        match (self.dark, focused) {
-            (true, true) => rgb(0x2A, 0x2A, 0x2A),
-            (true, false) => rgb(0x24, 0x24, 0x24),
-            (false, true) => rgb(0xE9, 0xEE, 0xF6),
-            (false, false) => rgb(0xF0, 0xF0, 0xF0),
-        }
-    }
     /// Translucent bar/menu backgrounds (blended over the wallpaper).
-    pub fn taskbar(&self) -> Color {
-        if self.dark { with_alpha(rgb(0x1C, 0x1C, 0x1C), 240) } else { with_alpha(rgb(0xEE, 0xEE, 0xEE), 240) }
-    }
     pub fn menu(&self) -> Color {
         if self.dark { rgb(0x26, 0x26, 0x26) } else { rgb(0xF6, 0xF6, 0xF6) }
     }
     pub fn accent_text(&self) -> Color {
         rgb(255, 255, 255)
+    }
+    /// Tints laid over the blurred wallpaper ("Mica"): taskbar, Start
+    /// menu, flyouts and the title bar of the focused window.
+    pub fn taskbar_tint(&self) -> Color {
+        if self.dark { with_alpha(rgb(0x1C, 0x1C, 0x1C), 205) } else { with_alpha(rgb(0xEE, 0xEE, 0xEE), 200) }
+    }
+    pub fn menu_tint(&self) -> Color {
+        if self.dark { with_alpha(rgb(0x24, 0x24, 0x24), 228) } else { with_alpha(rgb(0xF6, 0xF6, 0xF6), 225) }
+    }
+    pub fn title_tint(&self, focused: bool) -> Color {
+        match (self.dark, focused) {
+            (true, true) => with_alpha(rgb(0x20, 0x20, 0x20), 200),
+            (true, false) => rgb(0x24, 0x24, 0x24),
+            (false, true) => with_alpha(rgb(0xF3, 0xF3, 0xF3), 190),
+            (false, false) => rgb(0xF0, 0xF0, 0xF0),
+        }
+    }
+    pub fn danger(&self) -> Color {
+        rgb(0xE1, 0x1D, 0x48)
+    }
+
+    /// `key=value` lines for D:\Meridian\settings.ini.
+    pub fn to_ini(&self) -> alloc::string::String {
+        let accent = ACCENTS.iter().position(|a| a.1 == self.accent).unwrap_or(0);
+        alloc::format!(
+            "[Personalisation]\r\ndark={}\r\naccent={}\r\nwallpaper={}\r\ntaskbar_left={}\r\n",
+            self.dark as u8,
+            accent,
+            self.wallpaper,
+            self.taskbar_left as u8
+        )
+    }
+
+    /// Applies the values found in a settings file (unknown keys ignored).
+    pub fn from_ini(mut self, text: &str) -> Self {
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let n: usize = v.trim().parse().unwrap_or(usize::MAX);
+            match k.trim() {
+                "dark" if n <= 1 => self.dark = n == 1,
+                "accent" if n < ACCENTS.len() => self.accent = ACCENTS[n].1,
+                "wallpaper" if n < WALLPAPERS.len() => self.wallpaper = n,
+                "taskbar_left" if n <= 1 => self.taskbar_left = n == 1,
+                _ => {}
+            }
+        }
+        self
     }
 }
 
@@ -100,6 +136,17 @@ pub enum Icon {
     Drive,
     Power,
     Restart,
+    Calculator,
+    Paint,
+    Clock,
+    Photos,
+    Mines,
+    Puzzle,
+    Image,
+    Lock,
+    Documents,
+    Pictures,
+    Desktop,
 }
 
 /// Draws `icon` in a `size` x `size` box at (x, y).
@@ -116,6 +163,108 @@ pub fn icon(cv: &mut Canvas, icon: Icon, x: i32, y: i32, size: i32, t: &Theme) {
             cv.ring(cx, cy, rr, s * 0.07, rgb(255, 255, 255));
             cv.line(cx, cy - rr, cx, cy + rr, s * 0.07, rgb(255, 255, 255));
             cv.line(cx - rr, cy, cx + rr, cy, s * 0.05, with_alpha(rgb(255, 255, 255), 200));
+        }
+        Icon::Documents | Icon::Pictures | Icon::Desktop => {
+            icon_folder(cv, x, y, size);
+            let badge = Rect::new(x + px(0.5), y + px(0.48), px(0.34), px(0.3));
+            let c = match icon {
+                Icon::Documents => rgb(0x25, 0x63, 0xEB),
+                Icon::Pictures => rgb(0x0D, 0x94, 0x88),
+                _ => rgb(0x7C, 0x3A, 0xED),
+            };
+            cv.fill_rounded(badge, px(0.05), c);
+            if icon == Icon::Pictures {
+                cv.circle(fx + s * 0.6, fy + s * 0.56, s * 0.04, rgb(255, 255, 255));
+                cv.line(fx + s * 0.53, fy + s * 0.74, fx + s * 0.66, fy + s * 0.62, s * 0.05, rgb(255, 255, 255));
+                cv.line(fx + s * 0.66, fy + s * 0.62, fx + s * 0.8, fy + s * 0.74, s * 0.05, rgb(255, 255, 255));
+            } else {
+                for i in 0..2 {
+                    let ly = y + px(0.56 + 0.1 * i as f32);
+                    cv.fill(Rect::new(x + px(0.56), ly, px(0.22), px(0.04).max(1)), rgb(255, 255, 255));
+                }
+            }
+        }
+        Icon::Calculator => {
+            let body = Rect::new(x + px(0.16), y + px(0.06), px(0.68), px(0.88));
+            cv.fill_rounded(body, px(0.12), rgb(0x37, 0x41, 0x51));
+            cv.fill_rounded(Rect::new(x + px(0.25), y + px(0.14), px(0.5), px(0.18)), px(0.04), rgb(0xA7, 0xF3, 0xD0));
+            for row in 0..3 {
+                for col in 0..3 {
+                    let c = if row == 2 && col == 2 { t.accent } else { rgb(0x9C, 0xA3, 0xAF) };
+                    let k = Rect::new(
+                        x + px(0.25 + 0.17 * col as f32),
+                        y + px(0.4 + 0.17 * row as f32),
+                        px(0.13).max(2),
+                        px(0.12).max(2),
+                    );
+                    cv.fill_rounded(k, px(0.03), c);
+                }
+            }
+        }
+        Icon::Paint => {
+            let (cx, cy) = (fx + s * 0.48, fy + s * 0.52);
+            cv.circle(cx, cy, s * 0.4, rgb(0xF5, 0xE6, 0xC8));
+            cv.circle(
+                fx + s * 0.62,
+                fy + s * 0.68,
+                s * 0.1,
+                if t.dark { rgb(0x20, 0x20, 0x20) } else { rgb(0xF3, 0xF3, 0xF3) },
+            );
+            for (dx, dy, c) in [
+                (0.3, 0.38, rgb(0xE1, 0x1D, 0x48)),
+                (0.46, 0.26, rgb(0xF5, 0x9E, 0x0B)),
+                (0.64, 0.34, rgb(0x16, 0xA3, 0x4A)),
+                (0.3, 0.6, rgb(0x25, 0x63, 0xEB)),
+            ] {
+                cv.circle(fx + s * dx, fy + s * dy, s * 0.07, c);
+            }
+        }
+        Icon::Clock => {
+            let (cx, cy) = (fx + s * 0.5, fy + s * 0.5);
+            cv.circle(cx, cy, s * 0.42, t.accent);
+            cv.circle(cx, cy, s * 0.34, rgb(255, 255, 255));
+            cv.line(cx, cy, cx, cy - s * 0.24, s * 0.07, rgb(0x1F, 0x29, 0x37));
+            cv.line(cx, cy, cx + s * 0.16, cy + s * 0.08, s * 0.07, rgb(0x1F, 0x29, 0x37));
+        }
+        Icon::Photos | Icon::Image => {
+            let r = Rect::new(x + px(0.08), y + px(0.16), px(0.84), px(0.68));
+            cv.fill_rounded(
+                r,
+                px(0.08),
+                if icon == Icon::Photos { rgb(0x0E, 0x74, 0x90) } else { rgb(0xFF, 0xFF, 0xFF) },
+            );
+            cv.fill_rounded(r.inset(px(0.06).max(1)), px(0.04), rgb(0x7D, 0xD3, 0xFC));
+            cv.circle(fx + s * 0.68, fy + s * 0.36, s * 0.07, rgb(0xFD, 0xE0, 0x47));
+            cv.line(fx + s * 0.16, fy + s * 0.74, fx + s * 0.42, fy + s * 0.44, s * 0.1, rgb(0x16, 0xA3, 0x4A));
+            cv.line(fx + s * 0.42, fy + s * 0.44, fx + s * 0.6, fy + s * 0.66, s * 0.1, rgb(0x16, 0xA3, 0x4A));
+            cv.line(fx + s * 0.56, fy + s * 0.62, fx + s * 0.84, fy + s * 0.5, s * 0.08, rgb(0x15, 0x80, 0x3D));
+        }
+        Icon::Mines => {
+            cv.fill_rounded(Rect::new(x + px(0.06), y + px(0.06), px(0.88), px(0.88)), px(0.16), rgb(0xCB, 0xD5, 0xE1));
+            let (cx, cy) = (fx + s * 0.5, fy + s * 0.52);
+            let dark = rgb(0x1F, 0x29, 0x37);
+            for (dx, dy) in [(1.0, 0.0), (0.0, 1.0), (0.707, 0.707), (0.707, -0.707)] {
+                cv.line(cx - dx * s * 0.32, cy - dy * s * 0.32, cx + dx * s * 0.32, cy + dy * s * 0.32, s * 0.07, dark);
+            }
+            cv.circle(cx, cy, s * 0.22, dark);
+            cv.circle(cx - s * 0.08, cy - s * 0.08, s * 0.07, rgb(255, 255, 255));
+        }
+        Icon::Puzzle => {
+            let colors = [rgb(0xF5, 0x9E, 0x0B), rgb(0xEA, 0x58, 0x0C), rgb(0xFB, 0xBF, 0x24), rgb(0xD9, 0x77, 0x06)];
+            for i in 0..4 {
+                let r = Rect::new(
+                    x + px(0.1 + 0.42 * (i % 2) as f32),
+                    y + px(0.1 + 0.42 * (i / 2) as f32),
+                    px(0.38),
+                    px(0.38),
+                );
+                cv.fill_rounded(r, px(0.07), colors[i as usize]);
+            }
+        }
+        Icon::Lock => {
+            let c = t.text();
+            cv.ring(fx + s * 0.5, fy + s * 0.38, s * 0.2, s * 0.08, c);
+            cv.fill_rounded(Rect::new(x + px(0.22), y + px(0.42), px(0.56), px(0.46)), px(0.08), c);
         }
         Icon::Explorer | Icon::Folder => {
             let back = rgb(0xE0, 0xA0, 0x2A);
@@ -241,6 +390,15 @@ pub fn icon(cv: &mut Canvas, icon: Icon, x: i32, y: i32, size: i32, t: &Theme) {
             cv.line(cx + s * 0.04, fy + s * 0.2, cx + s * 0.04, fy + s * 0.04, s * 0.08, c);
         }
     }
+}
+
+fn icon_folder(cv: &mut Canvas, x: i32, y: i32, size: i32) {
+    let px = |v: f32| (v * size as f32) as i32;
+    let back = rgb(0xE0, 0xA0, 0x2A);
+    let front = rgb(0xF7, 0xC9, 0x48);
+    cv.fill_rounded(Rect::new(x + px(0.06), y + px(0.16), px(0.4), px(0.2)), px(0.06), back);
+    cv.fill_rounded(Rect::new(x + px(0.06), y + px(0.24), px(0.88), px(0.6)), px(0.08), back);
+    cv.fill_rounded(Rect::new(x + px(0.06), y + px(0.34), px(0.88), px(0.52)), px(0.08), front);
 }
 
 /// Generates a wallpaper (computed at quarter resolution and scaled up

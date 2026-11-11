@@ -60,6 +60,8 @@ const SIG_ATAPI: u32 = 0xEB14_0101;
 
 const ATA_IDENTIFY: u8 = 0xEC;
 const ATA_READ_DMA_EXT: u8 = 0x25;
+const ATA_WRITE_DMA_EXT: u8 = 0x35;
+const ATA_FLUSH_CACHE_EXT: u8 = 0xEA;
 const FIS_REG_H2D: u8 = 0x27;
 
 /// DMA bounce buffer size (and so the largest single read command).
@@ -113,8 +115,9 @@ pub struct AhciDisk {
 }
 
 impl AhciDisk {
-    /// Issues one ATA command whose data (if any) lands in the bounce buffer.
-    fn issue(&self, command: u8, lba: u64, count: u16, bytes: usize) -> Result<(), IoError> {
+    /// Issues one ATA command whose data (if any) moves through the bounce
+    /// buffer: device to memory, or memory to device when `write` is set.
+    fn issue(&self, command: u8, lba: u64, count: u16, bytes: usize, write: bool) -> Result<(), IoError> {
         let page = phys_to_virt(self.control);
         let table = page + TABLE_OFFSET;
         // SAFETY: the control page belongs to this port and only the
@@ -144,15 +147,19 @@ impl AhciDisk {
             for (i, b) in bytes_fis.iter().enumerate() {
                 write_volatile(fis.add(i), *b);
             }
-            let prdt = (table + 0x80) as *mut u32;
-            write_volatile(prdt, self.buffer as u32);
-            write_volatile(prdt.add(1), (self.buffer >> 32) as u32);
-            write_volatile(prdt.add(2), 0);
-            write_volatile(prdt.add(3), (bytes - 1) as u32);
+            if bytes > 0 {
+                let prdt = (table + 0x80) as *mut u32;
+                write_volatile(prdt, self.buffer as u32);
+                write_volatile(prdt.add(1), (self.buffer >> 32) as u32);
+                write_volatile(prdt.add(2), 0);
+                write_volatile(prdt.add(3), (bytes - 1) as u32);
+            }
 
             let header = page as *mut u32;
-            // CFL = 5 dwords (a register FIS), one PRDT entry, read.
-            write_volatile(header, 5 | (1 << 16));
+            // CFL = 5 dwords (a register FIS), W = direction, PRDTL = one
+            // entry (none for commands without data).
+            let prdtl = if bytes == 0 { 0 } else { 1 };
+            write_volatile(header, 5 | (write as u32) << 6 | prdtl << 16);
             write_volatile(header.add(1), 0);
             let table_phys = self.control + TABLE_OFFSET;
             write_volatile(header.add(2), table_phys as u32);
@@ -205,7 +212,7 @@ impl AhciDisk {
     }
 
     fn identify(&mut self) -> Result<(), IoError> {
-        self.with_lock(|| self.issue(ATA_IDENTIFY, 0, 0, 512))?;
+        self.with_lock(|| self.issue(ATA_IDENTIFY, 0, 0, 512, false))?;
         let mut id = [0u16; 256];
         // SAFETY: the bounce buffer holds the 512-byte IDENTIFY data.
         unsafe {
@@ -269,7 +276,7 @@ impl BlockDevice for AhciDisk {
             while done < buf.len() {
                 let n = (buf.len() - done).min(CHUNK_BYTES);
                 let count = (n / ss) as u16;
-                self.issue(ATA_READ_DMA_EXT, lba + (done / ss) as u64, count, n)?;
+                self.issue(ATA_READ_DMA_EXT, lba + (done / ss) as u64, count, n, false)?;
                 // SAFETY: the device just wrote `n` bytes to the buffer.
                 unsafe {
                     core::ptr::copy_nonoverlapping(phys_to_virt(self.buffer) as *const u8, buf[done..].as_mut_ptr(), n)
@@ -278,6 +285,34 @@ impl BlockDevice for AhciDisk {
             }
             Ok(())
         })
+    }
+
+    fn writable(&self) -> bool {
+        true
+    }
+
+    fn write_sectors(&self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
+        block::check_request(self, lba, buf.len())?;
+        let ss = self.sector_size;
+        self.with_lock(|| {
+            let mut done = 0;
+            while done < buf.len() {
+                let n = (buf.len() - done).min(CHUNK_BYTES);
+                let count = (n / ss) as u16;
+                // SAFETY: the bounce buffer is CHUNK_BYTES long and only the
+                // lock holder uses it.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(buf[done..].as_ptr(), phys_to_virt(self.buffer) as *mut u8, n)
+                };
+                self.issue(ATA_WRITE_DMA_EXT, lba + (done / ss) as u64, count, n, true)?;
+                done += n;
+            }
+            Ok(())
+        })
+    }
+
+    fn flush(&self) -> Result<(), IoError> {
+        self.with_lock(|| self.issue(ATA_FLUSH_CACHE_EXT, 0, 0, 0, false))
     }
 }
 

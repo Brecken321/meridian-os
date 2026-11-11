@@ -5,7 +5,9 @@
 use alloc::sync::Arc;
 use alloc::vec;
 
-use meridian_abi::{InputEvent, ProcessInfo, ThreadInfo, dir_record, power, protection, service, status};
+use meridian_abi::{
+    InputEvent, ProcessInfo, ThreadInfo, VolumeInfo, dir_record, power, protection, service, status, volume_flags,
+};
 
 use crate::arch::x86_64::syscall::SyscallFrame;
 use crate::fs::FsError;
@@ -35,6 +37,12 @@ fn fs_status(e: FsError) -> i64 {
         FsError::Io(_) => status::DEVICE_NOT_READY,
         FsError::NoMemory | FsError::TooLarge => status::NO_MEMORY,
         FsError::NotRecognized | FsError::Unsupported | FsError::Corrupt => status::UNSUCCESSFUL,
+        FsError::ReadOnly => status::MEDIA_WRITE_PROTECTED,
+        FsError::AlreadyExists => status::OBJECT_NAME_COLLISION,
+        FsError::NotEmpty => status::DIRECTORY_NOT_EMPTY,
+        FsError::InvalidName => status::OBJECT_NAME_INVALID,
+        FsError::DiskFull => status::DISK_FULL,
+        FsError::NotSameDrive => status::NOT_SAME_DEVICE,
     }
 }
 
@@ -51,6 +59,8 @@ fn copy_name(dst: &mut [u8], name: &str) {
 }
 
 const MAX_DEBUG_PRINT: usize = 4096;
+/// Largest file `WRITE_FILE` accepts in one call.
+const MAX_WRITE: u64 = 64 * 1024 * 1024;
 const MAX_ALLOCATION: u64 = 1 << 30;
 
 pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
@@ -340,6 +350,72 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
                 Ok(()) => status::SUCCESS,
                 Err(_) => status::ACCESS_VIOLATION,
             }
+        }
+        service::WRITE_FILE => {
+            let path = match user_path(a0, a1) {
+                Ok(p) => p,
+                Err(s) => return s,
+            };
+            if frame.r10 > MAX_WRITE {
+                return status::INVALID_PARAMETER;
+            }
+            let mut data = alloc::vec::Vec::new();
+            if data.try_reserve_exact(frame.r10 as usize).is_err() {
+                return status::NO_MEMORY;
+            }
+            data.resize(frame.r10 as usize, 0);
+            if user::copy_from_user(&mut data, frame.rdx).is_err() {
+                return status::ACCESS_VIOLATION;
+            }
+            match crate::fs::write_file(&path, &data) {
+                Ok(()) => status::SUCCESS,
+                Err(e) => fs_status(e),
+            }
+        }
+        service::CREATE_DIRECTORY | service::DELETE_FILE => {
+            let path = match user_path(a0, a1) {
+                Ok(p) => p,
+                Err(s) => return s,
+            };
+            let result = if frame.rax == service::CREATE_DIRECTORY {
+                crate::fs::create_dir(&path)
+            } else {
+                crate::fs::delete(&path)
+            };
+            match result {
+                Ok(()) => status::SUCCESS,
+                Err(e) => fs_status(e),
+            }
+        }
+        service::RENAME => {
+            let (from, to) = match (user_path(a0, a1), user_path(frame.rdx, frame.r10)) {
+                (Ok(f), Ok(t)) => (f, t),
+                (Err(s), _) | (_, Err(s)) => return s,
+            };
+            match crate::fs::rename(&from, &to) {
+                Ok(()) => status::SUCCESS,
+                Err(e) => fs_status(e),
+            }
+        }
+        service::QUERY_VOLUMES => {
+            let max = a1 as usize / core::mem::size_of::<VolumeInfo>();
+            let mut written = 0usize;
+            for v in crate::fs::volumes().into_iter().take(max) {
+                let mut info = VolumeInfo {
+                    letter: v.letter as u32,
+                    flags: if v.fs.writable() { volume_flags::WRITABLE } else { 0 },
+                    total_bytes: v.fs.size_bytes(),
+                    free_bytes: v.fs.free_bytes(),
+                    label: [0; 16],
+                };
+                copy_name(&mut info.label, &v.fs.label);
+                let at = a0 + (written * core::mem::size_of::<VolumeInfo>()) as u64;
+                if user::copy_to_user(at, bytes_of(&info)).is_err() {
+                    return status::ACCESS_VIOLATION;
+                }
+                written += 1;
+            }
+            written as i64
         }
         service::POWER => match a0 {
             power::SHUT_DOWN => {

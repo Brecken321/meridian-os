@@ -77,8 +77,20 @@ pub mod service {
     pub const QUERY_TIME: u64 = 24;
     /// `power(action)`: [`super::power`] action; returns only on failure.
     pub const POWER: u64 = 25;
+    /// `write_file(path, path_len, buffer, length)`: creates the file or
+    /// replaces its contents. Only drives on a Meridian data partition are
+    /// writable (`MEDIA_WRITE_PROTECTED` otherwise).
+    pub const WRITE_FILE: u64 = 26;
+    /// `create_directory(path, path_len)`
+    pub const CREATE_DIRECTORY: u64 = 27;
+    /// `delete_file(path, path_len)`: deletes a file or an empty folder.
+    pub const DELETE_FILE: u64 = 28;
+    /// `rename(from, from_len, to, to_len)`: renames or moves within a drive.
+    pub const RENAME: u64 = 29;
+    /// `query_volumes(buffer, length) -> count` of [`super::VolumeInfo`]
+    pub const QUERY_VOLUMES: u64 = 30;
 
-    pub const COUNT: u64 = 26;
+    pub const COUNT: u64 = 31;
 }
 
 /// Actions for `POWER`.
@@ -198,6 +210,25 @@ pub struct ProcessInfo {
     pub name: [u8; 32],
 }
 
+/// Returned (as an array) by `QUERY_VOLUMES`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VolumeInfo {
+    /// Drive letter (ASCII).
+    pub letter: u32,
+    /// [`volume_flags`] bits.
+    pub flags: u32,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    /// Volume label (UTF-8, zero-padded).
+    pub label: [u8; 16],
+}
+
+pub mod volume_flags {
+    /// The drive accepts writes.
+    pub const WRITABLE: u32 = 1 << 0;
+}
+
 /// Returned by `QUERY_TIME`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -230,6 +261,12 @@ pub mod status {
     pub const NOT_A_DIRECTORY: i64 = 0xC000_0103_u32 as i32 as i64;
     pub const INVALID_IMAGE_FORMAT: i64 = 0xC000_007B_u32 as i32 as i64;
     pub const DEVICE_NOT_READY: i64 = 0xC000_00A3_u32 as i32 as i64;
+    pub const MEDIA_WRITE_PROTECTED: i64 = 0xC000_00A2_u32 as i32 as i64;
+    pub const OBJECT_NAME_INVALID: i64 = 0xC000_0033_u32 as i32 as i64;
+    pub const OBJECT_NAME_COLLISION: i64 = 0xC000_0035_u32 as i32 as i64;
+    pub const DISK_FULL: i64 = 0xC000_007F_u32 as i32 as i64;
+    pub const DIRECTORY_NOT_EMPTY: i64 = 0xC000_0101_u32 as i32 as i64;
+    pub const NOT_SAME_DEVICE: i64 = 0xC000_00D4_u32 as i32 as i64;
     /// Returned by `PROCESS_STATUS` while the process runs.
     pub const STILL_ACTIVE: i64 = 0x0000_0103;
     pub const INVALID_SYSTEM_SERVICE: i64 = 0xC000_001C_u32 as i32 as i64;

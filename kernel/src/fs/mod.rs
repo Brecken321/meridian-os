@@ -2,8 +2,10 @@
 //!
 //! Every partition with a recognised file system is mounted under a drive
 //! letter, starting at `C:`, in discovery order. Paths use Windows syntax
-//! (`C:\MERIDIAN\INIT.EXE`, case-insensitive; `/` also accepted). Access is
-//! read-only.
+//! (`C:\MERIDIAN\INIT.EXE`, case-insensitive; `/` also accepted).
+//!
+//! Volumes are read-only unless they live on a Meridian data partition
+//! (see `io::partition::MERIDIAN_DATA_TYPE`): only those accept writes.
 //!
 //! Note: today the only recognised file system is FAT32, so on a typical PC
 //! the EFI system partition becomes `C:`. That changes once Meridian has its
@@ -32,6 +34,12 @@ pub enum FsError {
     NoMemory,
     NoSuchVolume,
     BadPath,
+    ReadOnly,
+    AlreadyExists,
+    NotEmpty,
+    InvalidName,
+    DiskFull,
+    NotSameDrive,
 }
 
 impl FsError {
@@ -48,6 +56,12 @@ impl FsError {
             FsError::NoMemory => "out of memory",
             FsError::NoSuchVolume => "no such drive",
             FsError::BadPath => "invalid path",
+            FsError::ReadOnly => "the drive or file is read-only",
+            FsError::AlreadyExists => "a file or folder with that name already exists",
+            FsError::NotEmpty => "the folder is not empty",
+            FsError::InvalidName => "invalid file name",
+            FsError::DiskFull => "the drive is full",
+            FsError::NotSameDrive => "cannot move between drives",
         }
     }
 }
@@ -131,6 +145,33 @@ pub fn metadata(path: &str) -> Result<Option<DirEntry>, FsError> {
 pub fn list(path: &str) -> Result<Vec<DirEntry>, FsError> {
     let (volume, rest) = resolve(path)?;
     volume.fs.list(rest)
+}
+
+/// Creates `path` with `data`, replacing the file if it exists.
+pub fn write_file(path: &str, data: &[u8]) -> Result<(), FsError> {
+    let (volume, rest) = resolve(path)?;
+    volume.fs.write_file(rest, data)
+}
+
+pub fn create_dir(path: &str) -> Result<(), FsError> {
+    let (volume, rest) = resolve(path)?;
+    volume.fs.create_dir(rest)
+}
+
+/// Deletes a file or an empty folder.
+pub fn delete(path: &str) -> Result<(), FsError> {
+    let (volume, rest) = resolve(path)?;
+    volume.fs.delete(rest)
+}
+
+/// Renames or moves within one drive.
+pub fn rename(from: &str, to: &str) -> Result<(), FsError> {
+    let (volume, from_rest) = resolve(from)?;
+    let (to_volume, to_rest) = resolve(to)?;
+    if volume.letter != to_volume.letter {
+        return Err(FsError::NotSameDrive);
+    }
+    volume.fs.rename(from_rest, to_rest)
 }
 
 /// Brings up storage: disk controllers, partitions and volumes.

@@ -1,7 +1,8 @@
-//! The built-in desktop apps. Each one talks to the kernel through real
-//! system calls; nothing on screen is a mock-up. (They run inside the
-//! desktop process for now; separate processes need the window-server IPC
-//! that is on the roadmap.)
+//! The built-in desktop apps: the types they share with the shell, and the
+//! smaller apps (Terminal, Task Manager, Settings, About). Each app talks
+//! to the kernel through real system calls; nothing on screen is a mock-up.
+//! (They run inside the desktop process for now; separate processes need
+//! the window-server IPC that is on the roadmap.)
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -9,17 +10,27 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use meridian_rt::sys::{self, DirEntry, InputEvent, key};
+use meridian_rt::sys::{self, InputEvent, input, key, volume_flags};
 use meridian_rt::{Handle, status};
 
 use crate::font::{Fonts, MONO_H, MONO_W, Mono, Weight};
 use crate::gfx::{Canvas, Rect, rgb, with_alpha};
 use crate::ui::{self, ACCENTS, Icon, Theme, WALLPAPERS};
 
+/// Text and file clipboard shared by every app.
+#[derive(Default)]
+pub struct Clipboard {
+    pub text: String,
+    /// Paths copied (or cut, if `cut`) in File Explorer.
+    pub files: Vec<String>,
+    pub cut: bool,
+}
+
 pub struct Ctx<'a> {
     pub fonts: &'a mut Fonts,
     pub mono: &'a Mono,
     pub theme: Theme,
+    pub clipboard: &'a mut Clipboard,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,12 +41,61 @@ pub enum AppKind {
     TaskManager,
     Settings,
     About,
+    Calculator,
+    Paint,
+    Clock,
+    Photos,
+    Mines,
+    Puzzle,
+}
+
+/// Every app, in Start menu order.
+pub const ALL_APPS: [AppKind; 12] = [
+    AppKind::Explorer,
+    AppKind::Notepad,
+    AppKind::Terminal,
+    AppKind::Calculator,
+    AppKind::Paint,
+    AppKind::Photos,
+    AppKind::Clock,
+    AppKind::TaskManager,
+    AppKind::Settings,
+    AppKind::Mines,
+    AppKind::Puzzle,
+    AppKind::About,
+];
+
+/// One entry of a context menu; `id` 0 is a separator.
+#[derive(Clone)]
+pub struct MenuItem {
+    pub label: String,
+    pub id: u32,
+    pub enabled: bool,
+}
+
+impl MenuItem {
+    pub fn new(label: &str, id: u32) -> Self {
+        Self { label: label.to_string(), id, enabled: true }
+    }
+    pub fn when(label: &str, id: u32, enabled: bool) -> Self {
+        Self { label: label.to_string(), id, enabled }
+    }
+    pub fn separator() -> Self {
+        Self { label: String::new(), id: 0, enabled: false }
+    }
 }
 
 pub enum Action {
     Open(AppKind, Option<String>),
     SetTheme(Theme),
     Close,
+    /// Shows a notification in the corner of the screen.
+    Notify(String),
+    /// Shows a context menu at content-relative (x, y); the choice comes
+    /// back through `App::menu`.
+    Menu(Vec<MenuItem>, i32, i32),
+    /// Files changed on disk: other windows and the desktop refresh.
+    FilesChanged,
 }
 
 pub trait App {
@@ -45,10 +105,25 @@ pub trait App {
         icon_for(self.kind())
     }
     fn size(&self) -> (i32, i32);
+    fn min_size(&self) -> (i32, i32) {
+        (360, 240)
+    }
     /// Draws the content into `r` (canvas coordinates).
     fn draw(&mut self, cv: &mut Canvas, r: Rect, cx: &mut Ctx);
     /// Left click at content-relative (`x`, `y`).
     fn click(&mut self, x: i32, y: i32, double: bool, cx: &mut Ctx) -> Vec<Action>;
+    fn right_click(&mut self, _x: i32, _y: i32, _cx: &mut Ctx) -> Vec<Action> {
+        Vec::new()
+    }
+    /// Pointer moved with the left button held (after a click in the
+    /// content); returns true to redraw.
+    fn drag(&mut self, _x: i32, _y: i32, _cx: &mut Ctx) -> bool {
+        false
+    }
+    /// Left button released after a click in the content.
+    fn release(&mut self, _x: i32, _y: i32, _cx: &mut Ctx) -> Vec<Action> {
+        Vec::new()
+    }
     /// Pointer moved to content-relative (`x`, `y`); returns true to redraw.
     fn hover(&mut self, _x: i32, _y: i32) -> bool {
         false
@@ -56,14 +131,34 @@ pub trait App {
     fn key(&mut self, _e: &InputEvent, _cx: &mut Ctx) -> Vec<Action> {
         Vec::new()
     }
+    /// A context-menu choice.
+    fn menu(&mut self, _id: u32, _cx: &mut Ctx) -> Vec<Action> {
+        Vec::new()
+    }
     /// Mouse wheel turned by `notches` (positive scrolls down); returns
     /// true to redraw.
     fn wheel(&mut self, _notches: i32) -> bool {
         false
     }
-    /// Called about once a second; returns true to redraw.
+    /// Called every `interval()` milliseconds; returns true to redraw.
     fn tick(&mut self) -> bool {
         false
+    }
+    fn interval(&self) -> u64 {
+        1000
+    }
+    /// Files changed somewhere; returns true to redraw.
+    fn files_changed(&mut self) -> bool {
+        false
+    }
+    /// Actions the app wants to run on its own (timers finishing...).
+    fn pending(&mut self) -> Vec<Action> {
+        Vec::new()
+    }
+    /// The user asked to close the window; returning false keeps it open
+    /// (Notepad first asks whether to save).
+    fn close_requested(&mut self) -> bool {
+        true
     }
 }
 
@@ -75,6 +170,12 @@ pub fn icon_for(kind: AppKind) -> Icon {
         AppKind::TaskManager => Icon::TaskManager,
         AppKind::Settings => Icon::Settings,
         AppKind::About => Icon::About,
+        AppKind::Calculator => Icon::Calculator,
+        AppKind::Paint => Icon::Paint,
+        AppKind::Clock => Icon::Clock,
+        AppKind::Photos => Icon::Photos,
+        AppKind::Mines => Icon::Mines,
+        AppKind::Puzzle => Icon::Puzzle,
     }
 }
 
@@ -86,17 +187,47 @@ pub fn name_of(kind: AppKind) -> &'static str {
         AppKind::TaskManager => "Task Manager",
         AppKind::Settings => "Settings",
         AppKind::About => "About Meridian",
+        AppKind::Calculator => "Calculator",
+        AppKind::Paint => "Paint",
+        AppKind::Clock => "Clock",
+        AppKind::Photos => "Photos",
+        AppKind::Mines => "Minesweeper",
+        AppKind::Puzzle => "2048",
+    }
+}
+
+/// Words the Start menu search also matches.
+pub fn keywords_of(kind: AppKind) -> &'static str {
+    match kind {
+        AppKind::Explorer => "files folders drives this pc",
+        AppKind::Notepad => "text editor notes write",
+        AppKind::Terminal => "command prompt shell console cmd",
+        AppKind::TaskManager => "processes threads cpu memory performance",
+        AppKind::Settings => "personalise theme dark light accent wallpaper storage",
+        AppKind::About => "version system info",
+        AppKind::Calculator => "math numbers calc",
+        AppKind::Paint => "draw picture image art",
+        AppKind::Clock => "time stopwatch timer alarm",
+        AppKind::Photos => "pictures images viewer",
+        AppKind::Mines => "game mines",
+        AppKind::Puzzle => "game tiles puzzle",
     }
 }
 
 pub fn create(kind: AppKind, arg: Option<String>) -> Box<dyn App> {
     match kind {
-        AppKind::Explorer => Box::new(Explorer::new(arg.unwrap_or_default())),
-        AppKind::Notepad => Box::new(Notepad::new(arg)),
-        AppKind::Terminal => Box::new(Terminal::new()),
+        AppKind::Explorer => Box::new(crate::explorer::Explorer::new(arg.unwrap_or_default())),
+        AppKind::Notepad => Box::new(crate::notepad::Notepad::new(arg)),
+        AppKind::Terminal => Box::new(Terminal::new(arg)),
         AppKind::TaskManager => Box::new(TaskManager::new()),
         AppKind::Settings => Box::new(Settings::new()),
         AppKind::About => Box::new(About { w: 500, h: 300 }),
+        AppKind::Calculator => Box::new(crate::calc::Calculator::new()),
+        AppKind::Paint => Box::new(crate::paint::Paint::new(arg)),
+        AppKind::Clock => Box::new(crate::clock::Clock::new()),
+        AppKind::Photos => Box::new(crate::photos::Photos::new(arg)),
+        AppKind::Mines => Box::new(crate::games::Mines::new()),
+        AppKind::Puzzle => Box::new(crate::games::Puzzle::new()),
     }
 }
 
@@ -109,23 +240,30 @@ pub fn error_text(code: i64) -> &'static str {
         status::INVALID_IMAGE_FORMAT => "not a program Meridian can run yet",
         status::NO_MEMORY => "out of memory",
         status::DEVICE_NOT_READY => "disk error",
+        status::MEDIA_WRITE_PROTECTED => "the drive is read-only (save on D: instead)",
+        status::OBJECT_NAME_COLLISION => "a file or folder with that name already exists",
+        status::DIRECTORY_NOT_EMPTY => "the folder is not empty",
+        status::OBJECT_NAME_INVALID => "that name is not allowed",
+        status::DISK_FULL => "the drive is full",
+        status::NOT_SAME_DEVICE => "cannot move between drives",
+        status::INVALID_PARAMETER => "invalid name or path",
         _ => "failed",
     }
 }
 
-fn file_name(path: &str) -> &str {
+pub fn file_name(path: &str) -> &str {
     path.rsplit('\\').next().unwrap_or(path)
 }
 
-fn extension(name: &str) -> String {
+pub fn extension(name: &str) -> String {
     name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
 }
 
-fn join(dir: &str, name: &str) -> String {
+pub fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('\\') { format!("{dir}{name}") } else { format!("{dir}\\{name}") }
 }
 
-fn parent(path: &str) -> String {
+pub fn parent(path: &str) -> String {
     let trimmed = path.trim_end_matches('\\');
     match trimmed.rfind('\\') {
         Some(i) if i >= 2 => {
@@ -136,16 +274,71 @@ fn parent(path: &str) -> String {
     }
 }
 
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     match bytes {
         0..1024 => format!("{bytes} bytes"),
         1024..1_048_576 => format!("{} KB", bytes.div_ceil(1024)),
-        _ => format!("{}.{} MB", bytes / 1_048_576, bytes % 1_048_576 * 10 / 1_048_576),
+        1_048_576..1_073_741_824 => format!("{}.{} MB", bytes / 1_048_576, bytes % 1_048_576 * 10 / 1_048_576),
+        _ => format!("{}.{} GB", bytes >> 30, (bytes & ((1 << 30) - 1)) * 10 >> 30),
     }
 }
 
+pub const TEXT_EXTENSIONS: [&str; 9] = ["txt", "log", "md", "ini", "cfg", "json", "csv", "rs", "py"];
+
+pub fn file_icon(name: &str, is_dir: bool) -> Icon {
+    if is_dir {
+        return match name.to_ascii_lowercase().as_str() {
+            "documents" => Icon::Documents,
+            "pictures" => Icon::Pictures,
+            "desktop" => Icon::Desktop,
+            _ => Icon::Folder,
+        };
+    }
+    let ext = extension(name);
+    if ext == "exe" {
+        Icon::Program
+    } else if ext == "bmp" {
+        Icon::Image
+    } else if TEXT_EXTENSIONS.contains(&ext.as_str()) {
+        Icon::TextFile
+    } else {
+        Icon::File
+    }
+}
+
+pub fn file_kind(name: &str, is_dir: bool) -> String {
+    let ext = extension(name);
+    if is_dir {
+        "File folder".to_string()
+    } else if ext.is_empty() {
+        "File".to_string()
+    } else if ext == "exe" {
+        "Application".to_string()
+    } else if ext == "bmp" {
+        "Bitmap image".to_string()
+    } else if ext == "txt" {
+        "Text document".to_string()
+    } else {
+        format!("{} file", ext.to_ascii_uppercase())
+    }
+}
+
+/// A free name like "New folder", "New folder (2)" in `dir`.
+pub fn unique_name(dir: &str, base: &str, ext: &str) -> String {
+    let existing: Vec<String> =
+        sys::list_directory(dir).map(|l| l.into_iter().map(|e| e.name.to_lowercase()).collect()).unwrap_or_default();
+    let dot = if ext.is_empty() { String::new() } else { format!(".{ext}") };
+    for n in 1..1000 {
+        let name = if n == 1 { format!("{base}{dot}") } else { format!("{base} ({n}){dot}") };
+        if !existing.contains(&name.to_lowercase()) {
+            return name;
+        }
+    }
+    format!("{base}{dot}")
+}
+
 /// Opens a file the way the shell would: folders in Explorer, text in
-/// Notepad, programs by starting a process.
+/// Notepad, pictures in Photos, programs by starting a process.
 pub enum Opened {
     Actions(Vec<Action>),
     Started(Handle, String),
@@ -156,10 +349,12 @@ pub fn open_path(path: &str, is_dir: bool) -> Opened {
     if is_dir {
         return Opened::Actions(vec![Action::Open(AppKind::Explorer, Some(path.to_string()))]);
     }
-    match extension(file_name(path)).as_str() {
-        "txt" | "log" | "md" | "ini" | "cfg" | "json" | "csv" => {
-            Opened::Actions(vec![Action::Open(AppKind::Notepad, Some(path.to_string()))])
-        }
+    let ext = extension(file_name(path));
+    if TEXT_EXTENSIONS.contains(&ext.as_str()) {
+        return Opened::Actions(vec![Action::Open(AppKind::Notepad, Some(path.to_string()))]);
+    }
+    match ext.as_str() {
+        "bmp" => Opened::Actions(vec![Action::Open(AppKind::Photos, Some(path.to_string()))]),
         "exe" => match sys::create_process(path, 0) {
             Ok(h) => Opened::Started(h, file_name(path).to_string()),
             Err(e) => Opened::Message(format!("Could not start {}: {}", file_name(path), error_text(e))),
@@ -168,529 +363,11 @@ pub fn open_path(path: &str, is_dir: bool) -> Opened {
     }
 }
 
-// ---------------------------------------------------------------------------
-// File Explorer
-// ---------------------------------------------------------------------------
-
-pub struct Explorer {
-    path: String,
-    entries: Vec<DirEntry>,
-    drives: Vec<char>,
-    selected: Option<usize>,
-    scroll: usize,
-    history: Vec<String>,
-    status: String,
-    error: Option<String>,
-    children: Vec<(Handle, String)>,
-    w: i32,
-    h: i32,
-}
-
-const TOOLBAR_H: i32 = 44;
-const NAV_W: i32 = 170;
-const ROW_H: i32 = 28;
-const STATUS_H: i32 = 26;
-
-impl Explorer {
-    fn new(path: String) -> Self {
-        let drives = ('C'..='H').filter(|d| sys::list_directory(&format!("{d}:\\")).is_ok()).collect();
-        let mut e = Self {
-            path: String::new(),
-            entries: Vec::new(),
-            drives,
-            selected: None,
-            scroll: 0,
-            history: Vec::new(),
-            status: String::new(),
-            error: None,
-            children: Vec::new(),
-            w: 860,
-            h: 520,
-        };
-        e.navigate(path, false);
-        e
-    }
-
-    fn navigate(&mut self, path: String, remember: bool) {
-        if remember && self.path != path {
-            self.history.push(self.path.clone());
-        }
-        self.selected = None;
-        self.scroll = 0;
-        self.error = None;
-        self.path = path;
-        if self.path.is_empty() {
-            self.entries = Vec::new();
-            self.status = format!("{} drive(s)", self.drives.len());
-            return;
-        }
-        match sys::list_directory(&self.path) {
-            Ok(mut list) => {
-                list.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
-                self.status = format!("{} items", list.len());
-                self.entries = list;
-            }
-            Err(e) => {
-                self.entries = Vec::new();
-                self.error = Some(format!("Cannot open {}: {}", self.path, error_text(e)));
-                self.status.clear();
-            }
-        }
-    }
-
-    fn rows_visible(&self) -> usize {
-        ((self.h - TOOLBAR_H - ROW_H - STATUS_H) / ROW_H).max(1) as usize
-    }
-
-    fn open_entry(&mut self, i: usize) -> Vec<Action> {
-        let Some(e) = self.entries.get(i).cloned() else { return Vec::new() };
-        let path = join(&self.path, &e.name);
-        if e.is_dir {
-            self.navigate(path, true);
-            return Vec::new();
-        }
-        match open_path(&path, false) {
-            Opened::Actions(a) => a,
-            Opened::Started(h, name) => {
-                self.status = format!("Started {name}; it reports to the system log");
-                self.children.push((h, name));
-                Vec::new()
-            }
-            Opened::Message(m) => {
-                self.status = m;
-                Vec::new()
-            }
-        }
-    }
-}
-
-impl App for Explorer {
-    fn kind(&self) -> AppKind {
-        AppKind::Explorer
-    }
-    fn title(&self) -> String {
-        if self.path.is_empty() { "This PC - File Explorer".into() } else { format!("{} - File Explorer", self.path) }
-    }
-    fn size(&self) -> (i32, i32) {
-        (860, 520)
-    }
-    fn wheel(&mut self, notches: i32) -> bool {
-        let max = self.entries.len().saturating_sub(self.rows_visible());
-        let old = self.scroll;
-        self.scroll = (self.scroll as i32 + notches * 3).clamp(0, max as i32) as usize;
-        self.scroll != old
-    }
-
-    fn draw(&mut self, cv: &mut Canvas, r: Rect, cx: &mut Ctx) {
-        let t = cx.theme;
-        let f = &mut *cx.fonts;
-        self.w = r.w;
-        self.h = r.h;
-        cv.fill(r, t.window());
-        // Toolbar: back, up, refresh, address.
-        for i in 0..3 {
-            let b = Rect::new(r.x + 8 + i * 36, r.y + 8, 30, 28);
-            cv.fill_rounded(b, 4, t.hover());
-            let (cx_, cy) = (b.x as f32 + 15.0, b.y as f32 + 14.0);
-            let c = t.text();
-            match i {
-                0 => {
-                    cv.line(cx_ - 6.0, cy, cx_ + 6.0, cy, 1.4, c);
-                    cv.line(cx_ - 6.0, cy, cx_ - 1.0, cy - 5.0, 1.4, c);
-                    cv.line(cx_ - 6.0, cy, cx_ - 1.0, cy + 5.0, 1.4, c);
-                }
-                1 => {
-                    cv.line(cx_, cy - 6.0, cx_, cy + 6.0, 1.4, c);
-                    cv.line(cx_, cy - 6.0, cx_ - 5.0, cy - 1.0, 1.4, c);
-                    cv.line(cx_, cy - 6.0, cx_ + 5.0, cy - 1.0, 1.4, c);
-                }
-                _ => {
-                    // A 300-degree arc in 30-degree steps, then an arrowhead.
-                    let (cos, sin) = (0.866_f32, 0.5_f32);
-                    let (mut px, mut py) = (0.0_f32, -6.0_f32);
-                    for _ in 0..10 {
-                        let (nx, ny) = (px * cos - py * sin, px * sin + py * cos);
-                        cv.line(cx_ + px, cy + py, cx_ + nx, cy + ny, 1.4, c);
-                        (px, py) = (nx, ny);
-                    }
-                    cv.line(cx_ + px, cy + py, cx_ + px + 4.0, cy + py - 1.0, 1.4, c);
-                    cv.line(cx_ + px, cy + py, cx_ + px + 1.0, cy + py - 4.5, 1.4, c);
-                }
-            }
-        }
-        let addr = Rect::new(r.x + 120, r.y + 8, r.w - 132, 28);
-        cv.rounded_box(addr, 4, t.border(), t.surface());
-        let shown = if self.path.is_empty() { "This PC" } else { self.path.as_str() };
-        f.draw_fit(cv, addr.x + 10, addr.y + 5, shown, addr.w - 20, 14, Weight::Regular, t.text());
-        // Navigation pane.
-        let nav = Rect::new(r.x, r.y + TOOLBAR_H, NAV_W, r.h - TOOLBAR_H - STATUS_H);
-        cv.fill(nav, t.surface());
-        let mut ny = nav.y + 8;
-        let selected_nav = |label_path: &str| label_path == self.path;
-        let mut nav_item = |cv: &mut Canvas, f: &mut Fonts, icon: Icon, label: &str, selected: bool| {
-            if selected {
-                cv.fill_rounded(Rect::new(nav.x + 6, ny, NAV_W - 12, 28), 4, t.selection());
-            }
-            ui::icon(cv, icon, nav.x + 14, ny + 6, 16, &t);
-            f.draw(cv, nav.x + 38, ny + 5, label, 14, Weight::Regular, t.text());
-            ny += 32;
-        };
-        nav_item(cv, f, Icon::ThisPc, "This PC", self.path.is_empty());
-        for d in &self.drives {
-            let p = format!("{d}:\\");
-            nav_item(cv, f, Icon::Drive, &format!("Local Disk ({d}:)"), selected_nav(&p));
-        }
-        nav_item(cv, f, Icon::Folder, "MERIDIAN", self.path.eq_ignore_ascii_case("C:\\MERIDIAN"));
-        // Main area.
-        let main = Rect::new(r.x + NAV_W, r.y + TOOLBAR_H, r.w - NAV_W, r.h - TOOLBAR_H - STATUS_H);
-        cv.fill(main, t.window());
-        if let Some(err) = &self.error {
-            f.draw(cv, main.x + 20, main.y + 20, err, 14, Weight::Regular, rgb(0xE1, 0x1D, 0x48));
-        } else if self.path.is_empty() {
-            f.draw(cv, main.x + 20, main.y + 14, "Devices and drives", 14, Weight::Semibold, t.text());
-            for (i, d) in self.drives.iter().enumerate() {
-                let tile = Rect::new(main.x + 20 + i as i32 * 230, main.y + 44, 220, 64);
-                cv.rounded_box(tile, 6, t.border(), t.surface());
-                ui::icon(cv, Icon::Drive, tile.x + 12, tile.y + 12, 40, &t);
-                f.draw(cv, tile.x + 64, tile.y + 12, &format!("Local Disk ({d}:)"), 14, Weight::Semibold, t.text());
-                f.draw(cv, tile.x + 64, tile.y + 34, "FAT32, read-only", 12, Weight::Regular, t.text_dim());
-            }
-        } else {
-            let header = Rect::new(main.x, main.y, main.w, ROW_H);
-            let (cname, ctype, csize) = (main.x + 44, main.x + main.w - 270, main.x + main.w - 120);
-            f.draw(cv, cname, header.y + 6, "Name", 12, Weight::Regular, t.text_dim());
-            f.draw(cv, ctype, header.y + 6, "Type", 12, Weight::Regular, t.text_dim());
-            f.draw(cv, csize, header.y + 6, "Size", 12, Weight::Regular, t.text_dim());
-            cv.fill(Rect::new(main.x, header.bottom() - 1, main.w, 1), t.border());
-            for (row, (i, e)) in self.entries.iter().enumerate().skip(self.scroll).take(self.rows_visible()).enumerate()
-            {
-                let y = main.y + ROW_H + row as i32 * ROW_H;
-                if self.selected == Some(i) {
-                    cv.fill_rounded(Rect::new(main.x + 4, y + 1, main.w - 8, ROW_H - 2), 4, t.selection());
-                }
-                let ext = extension(&e.name);
-                let icon = if e.is_dir {
-                    Icon::Folder
-                } else if ext == "exe" {
-                    Icon::Program
-                } else if matches!(ext.as_str(), "txt" | "md" | "log" | "ini" | "cfg") {
-                    Icon::TextFile
-                } else {
-                    Icon::File
-                };
-                ui::icon(cv, icon, main.x + 16, y + 5, 18, &t);
-                f.draw_fit(cv, cname, y + 5, &e.name, ctype - cname - 12, 14, Weight::Regular, t.text());
-                let kind = if e.is_dir {
-                    "File folder".to_string()
-                } else if ext.is_empty() {
-                    "File".to_string()
-                } else if ext == "exe" {
-                    "Application".to_string()
-                } else {
-                    format!("{} file", ext.to_ascii_uppercase())
-                };
-                f.draw(cv, ctype, y + 5, &kind, 14, Weight::Regular, t.text_dim());
-                if !e.is_dir {
-                    f.draw(cv, csize, y + 5, &human_size(e.size), 14, Weight::Regular, t.text_dim());
-                }
-            }
-        }
-        // Status bar.
-        let sb = Rect::new(r.x, r.bottom() - STATUS_H, r.w, STATUS_H);
-        cv.fill(sb, t.surface());
-        cv.fill(Rect::new(sb.x, sb.y, sb.w, 1), t.border());
-        f.draw_fit(cv, sb.x + 12, sb.y + 5, &self.status, sb.w - 24, 12, Weight::Regular, t.text_dim());
-    }
-
-    fn click(&mut self, x: i32, y: i32, double: bool, _cx: &mut Ctx) -> Vec<Action> {
-        if y < TOOLBAR_H {
-            match (x - 8) / 36 {
-                0 if x >= 8 => {
-                    if let Some(prev) = self.history.pop() {
-                        self.navigate(prev, false);
-                    }
-                }
-                1 => {
-                    if !self.path.is_empty() {
-                        let up = parent(&self.path);
-                        self.navigate(up, true);
-                    }
-                }
-                2 => {
-                    let p = self.path.clone();
-                    self.navigate(p, false);
-                }
-                _ => {}
-            }
-            return Vec::new();
-        }
-        if x < NAV_W {
-            let i = (y - TOOLBAR_H - 8) / 32;
-            let target = if i == 0 {
-                Some(String::new())
-            } else if (i as usize) <= self.drives.len() {
-                Some(format!("{}:\\", self.drives[i as usize - 1]))
-            } else if i as usize == self.drives.len() + 1 {
-                Some("C:\\MERIDIAN".to_string())
-            } else {
-                None
-            };
-            if let Some(p) = target {
-                self.navigate(p, true);
-            }
-            return Vec::new();
-        }
-        if self.path.is_empty() {
-            let i = ((x - NAV_W - 20) / 230) as usize;
-            if y > TOOLBAR_H + 44 && y < TOOLBAR_H + 108 && i < self.drives.len() && double {
-                let p = format!("{}:\\", self.drives[i]);
-                self.navigate(p, true);
-            }
-            return Vec::new();
-        }
-        let row = (y - TOOLBAR_H - ROW_H) / ROW_H;
-        if row < 0 || y >= self.h - STATUS_H {
-            return Vec::new();
-        }
-        let i = self.scroll + row as usize;
-        if i >= self.entries.len() {
-            self.selected = None;
-            return Vec::new();
-        }
-        self.selected = Some(i);
-        if double { self.open_entry(i) } else { Vec::new() }
-    }
-
-    fn key(&mut self, e: &InputEvent, _cx: &mut Ctx) -> Vec<Action> {
-        let n = self.entries.len();
-        match e.key {
-            key::DOWN if n > 0 => self.selected = Some(self.selected.map_or(0, |s| (s + 1).min(n - 1))),
-            key::UP if n > 0 => self.selected = Some(self.selected.map_or(0, |s| s.saturating_sub(1))),
-            key::ENTER => {
-                if let Some(i) = self.selected {
-                    return self.open_entry(i);
-                }
-            }
-            key::BACKSPACE => {
-                if !self.path.is_empty() {
-                    let up = parent(&self.path);
-                    self.navigate(up, true);
-                }
-            }
-            _ => {}
-        }
-        if let Some(s) = self.selected {
-            let vis = self.rows_visible();
-            if s < self.scroll {
-                self.scroll = s;
-            } else if s >= self.scroll + vis {
-                self.scroll = s + 1 - vis;
-            }
-        }
-        Vec::new()
-    }
-
-    fn tick(&mut self) -> bool {
-        let mut changed = false;
-        self.children.retain(|(h, name)| match sys::process_status(h) {
-            Ok(Some(code)) => {
-                self.status = format!("{name} finished with exit code {:#x}", code as u32);
-                changed = true;
-                false
-            }
-            _ => true,
-        });
-        changed
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Notepad
-// ---------------------------------------------------------------------------
-
-pub struct Notepad {
-    path: Option<String>,
-    lines: Vec<String>,
-    row: usize,
-    col: usize,
-    scroll: usize,
-    modified: bool,
-    note: String,
-    h: i32,
-}
-
-impl Notepad {
-    fn new(path: Option<String>) -> Self {
-        let mut n = Self {
-            path: path.clone(),
-            lines: vec![String::new()],
-            row: 0,
-            col: 0,
-            scroll: 0,
-            modified: false,
-            note: String::new(),
-            h: 400,
-        };
-        if let Some(p) = path {
-            match sys::read_file(&p) {
-                Ok(data) => {
-                    let text = String::from_utf8_lossy(&data).replace('\r', "");
-                    n.lines = text.split('\n').map(String::from).collect();
-                }
-                Err(e) => n.note = format!("Could not open {p}: {}", error_text(e)),
-            }
-        }
-        n
-    }
-
-    fn visible(&self) -> usize {
-        ((self.h - 32) / 20).max(1) as usize
-    }
-
-    fn keep_visible(&mut self) {
-        let vis = self.visible();
-        if self.row < self.scroll {
-            self.scroll = self.row;
-        } else if self.row >= self.scroll + vis {
-            self.scroll = self.row + 1 - vis;
-        }
-    }
-}
-
-fn char_index(s: &str, col: usize) -> usize {
-    s.char_indices().nth(col).map_or(s.len(), |(i, _)| i)
-}
-
-impl App for Notepad {
-    fn kind(&self) -> AppKind {
-        AppKind::Notepad
-    }
-    fn title(&self) -> String {
-        let name = self.path.as_deref().map_or("Untitled", file_name);
-        format!("{}{name} - Notepad", if self.modified { "*" } else { "" })
-    }
-    fn size(&self) -> (i32, i32) {
-        (720, 480)
-    }
-    fn wheel(&mut self, notches: i32) -> bool {
-        let max = self.lines.len().saturating_sub(self.visible());
-        let old = self.scroll;
-        self.scroll = (self.scroll as i32 + notches * 3).clamp(0, max as i32) as usize;
-        self.scroll != old
-    }
-
-    fn draw(&mut self, cv: &mut Canvas, r: Rect, cx: &mut Ctx) {
-        let t = cx.theme;
-        let f = &mut *cx.fonts;
-        self.h = r.h;
-        cv.fill(r, t.surface());
-        let text_area = Rect::new(r.x, r.y, r.w, r.h - 26);
-        cv.set_clip(text_area);
-        for (i, line) in self.lines.iter().enumerate().skip(self.scroll).take(self.visible() + 1) {
-            let y = r.y + 8 + (i - self.scroll) as i32 * 20;
-            f.draw(cv, r.x + 12, y, line, 14, Weight::Regular, t.text());
-            if i == self.row {
-                let prefix = &line[..char_index(line, self.col)];
-                let cx_ = r.x + 12 + f.measure(prefix, 14, Weight::Regular);
-                cv.fill(Rect::new(cx_, y + 1, 1, 18), t.text());
-            }
-        }
-        cv.set_clip(r);
-        let sb = Rect::new(r.x, r.bottom() - 26, r.w, 26);
-        cv.fill(sb, t.window());
-        cv.fill(Rect::new(sb.x, sb.y, sb.w, 1), t.border());
-        let left =
-            if self.note.is_empty() { format!("Ln {}, Col {}", self.row + 1, self.col + 1) } else { self.note.clone() };
-        f.draw(cv, sb.x + 12, sb.y + 5, &left, 12, Weight::Regular, t.text_dim());
-        let right = if self.modified {
-            "Edited in memory - Meridian's storage is read-only, so it can't be saved yet"
-        } else {
-            "UTF-8"
-        };
-        let rw = f.measure(right, 12, Weight::Regular);
-        f.draw(cv, sb.right() - rw - 12, sb.y + 5, right, 12, Weight::Regular, t.text_dim());
-    }
-
-    fn click(&mut self, x: i32, y: i32, _double: bool, cx: &mut Ctx) -> Vec<Action> {
-        let row = (self.scroll + ((y - 8).max(0) / 20) as usize).min(self.lines.len() - 1);
-        self.row = row;
-        let line = &self.lines[row];
-        let mut col = 0;
-        for (i, _) in line.chars().enumerate() {
-            let w = cx.fonts.measure(&line[..char_index(line, i + 1)], 14, Weight::Regular);
-            if 12 + w > x + 3 {
-                break;
-            }
-            col = i + 1;
-        }
-        self.col = col;
-        Vec::new()
-    }
-
-    fn key(&mut self, e: &InputEvent, _cx: &mut Ctx) -> Vec<Action> {
-        let len = |s: &String| s.chars().count();
-        match e.key {
-            key::CHAR => {
-                if let Some(c) = char::from_u32(e.ch) {
-                    let line = &mut self.lines[self.row];
-                    let at = char_index(line, self.col);
-                    line.insert(at, c);
-                    self.col += 1;
-                    self.modified = true;
-                }
-            }
-            key::ENTER => {
-                let line = &mut self.lines[self.row];
-                let at = char_index(line, self.col);
-                let rest = line.split_off(at);
-                self.lines.insert(self.row + 1, rest);
-                self.row += 1;
-                self.col = 0;
-                self.modified = true;
-            }
-            key::BACKSPACE => {
-                if self.col > 0 {
-                    let line = &mut self.lines[self.row];
-                    let at = char_index(line, self.col - 1);
-                    line.remove(at);
-                    self.col -= 1;
-                    self.modified = true;
-                } else if self.row > 0 {
-                    let line = self.lines.remove(self.row);
-                    self.row -= 1;
-                    self.col = len(&self.lines[self.row]);
-                    self.lines[self.row].push_str(&line);
-                    self.modified = true;
-                }
-            }
-            key::LEFT => {
-                if self.col > 0 {
-                    self.col -= 1;
-                } else if self.row > 0 {
-                    self.row -= 1;
-                    self.col = len(&self.lines[self.row]);
-                }
-            }
-            key::RIGHT => {
-                if self.col < len(&self.lines[self.row]) {
-                    self.col += 1;
-                } else if self.row + 1 < self.lines.len() {
-                    self.row += 1;
-                    self.col = 0;
-                }
-            }
-            key::UP => self.row = self.row.saturating_sub(1),
-            key::DOWN => self.row = (self.row + 1).min(self.lines.len() - 1),
-            key::PAGE_UP => self.row = self.row.saturating_sub(self.visible()),
-            key::PAGE_DOWN => self.row = (self.row + self.visible()).min(self.lines.len() - 1),
-            key::HOME => self.col = 0,
-            key::END => self.col = len(&self.lines[self.row]),
-            _ => return Vec::new(),
-        }
-        self.col = self.col.min(len(&self.lines[self.row]));
-        self.keep_visible();
-        Vec::new()
-    }
+/// True for Ctrl+`letter` key events.
+pub fn ctrl(e: &InputEvent, letter: char) -> bool {
+    e.flags & input::CTRL != 0
+        && e.key == key::CHAR
+        && char::from_u32(e.ch).is_some_and(|c| c.eq_ignore_ascii_case(&letter) || c as u32 == letter as u32 - 96)
 }
 
 // ---------------------------------------------------------------------------
@@ -703,12 +380,44 @@ pub struct Terminal {
     cwd: String,
     children: Vec<(Handle, String)>,
     rows: usize,
+    history: Vec<String>,
+    history_pos: usize,
 }
 
+const TERMINAL_HELP: &str = "\
+  Files and folders
+    dir [path]          list a folder          cd <path>          change folder
+    type <file>         show a text file       mkdir <name>       make a folder
+    copy <from> <to>    copy a file            move <from> <to>   rename or move
+    del <file>          delete a file          rmdir <folder>     delete an empty folder
+    echo <text> > file  write text to a file (>> appends)
+    drives              list drives and free space
+  Programs and system
+    run <file.exe>      start a program        open <file>        open with its app
+    notepad, paint, calc, explorer, taskmgr, settings, photos, clock
+    ps                  processes              threads            kernel threads
+    mem                 memory                 uptime             time since boot
+    date                date and time          ver                version
+    cls                 clear the screen       exit               close this window
+  Keys: Up/Down recall commands, Ctrl+V pastes, Ctrl+L clears.
+  C: is the read-only boot disk; D: is the data drive where files can be saved.";
+
 impl Terminal {
-    fn new() -> Self {
-        let mut t =
-            Self { lines: Vec::new(), input: String::new(), cwd: "C:\\".into(), children: Vec::new(), rows: 24 };
+    fn new(cwd: Option<String>) -> Self {
+        let mut t = Self {
+            lines: Vec::new(),
+            input: String::new(),
+            cwd: "D:\\".into(),
+            children: Vec::new(),
+            rows: 24,
+            history: Vec::new(),
+            history_pos: 0,
+        };
+        if let Some(dir) = cwd.filter(|d| sys::list_directory(d).is_ok()) {
+            t.cwd = dir;
+        } else if sys::list_directory("D:\\").is_err() {
+            t.cwd = "C:\\".into();
+        }
         t.print("Meridian Terminal (user mode). Type 'help' for commands.");
         t.print("");
         t
@@ -725,9 +434,9 @@ impl Terminal {
     fn resolve(&self, arg: &str) -> String {
         let arg = arg.trim_matches('"').replace('/', "\\");
         if arg.len() >= 2 && arg.as_bytes()[1] == b':' {
-            return arg;
+            return if arg.len() == 2 { format!("{arg}\\") } else { arg };
         }
-        let mut path = self.cwd.clone();
+        let mut path = if arg.starts_with('\\') { self.cwd[..3].to_string() } else { self.cwd.clone() };
         for part in arg.split('\\').filter(|p| !p.is_empty()) {
             match part {
                 "." => {}
@@ -743,15 +452,67 @@ impl Terminal {
         path
     }
 
+    /// Splits arguments on spaces, keeping "quoted strings" together.
+    fn args(rest: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut quoted = false;
+        for c in rest.chars() {
+            match c {
+                '"' => quoted = !quoted,
+                ' ' if !quoted => {
+                    if !cur.is_empty() {
+                        out.push(core::mem::take(&mut cur));
+                    }
+                }
+                c => cur.push(c),
+            }
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        out
+    }
+
+    fn report(&mut self, what: &str, r: Result<(), i64>) -> bool {
+        match r {
+            Ok(()) => true,
+            Err(e) => {
+                self.print(&format!("{what}: {}", error_text(e)));
+                false
+            }
+        }
+    }
+
     fn run_command(&mut self, line: &str) -> Vec<Action> {
         let line = line.trim();
+        // echo text > file / >> file
+        if let Some(i) = line.find('>') {
+            if line[..i].trim_start().to_ascii_lowercase().starts_with("echo") {
+                let append = line[i + 1..].starts_with('>');
+                let target = line[i + if append { 2 } else { 1 }..].trim();
+                let text = line[..i].trim_start()[4..].trim();
+                let path = self.resolve(target);
+                let mut data = if append { sys::read_file(&path).unwrap_or_default() } else { Vec::new() };
+                data.extend_from_slice(text.as_bytes());
+                data.extend_from_slice(b"\r\n");
+                if self.report(&path, sys::write_file(&path, &data)) {
+                    return vec![Action::FilesChanged];
+                }
+                return Vec::new();
+            }
+        }
         let (cmd, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
+        let args = Self::args(rest);
+        // Commands that take one path use the whole rest of the line, so
+        // names with spaces work without quotes.
+        let one = rest.trim_matches('"').to_string();
+        let opt = if one.is_empty() { None } else { Some(self.resolve(&one)) };
+        let app = |kind: AppKind, arg: Option<String>| vec![Action::Open(kind, arg)];
         match cmd.to_ascii_lowercase().as_str() {
             "" => {}
-            "help" => self.print(
-                "  dir [path]      list a folder        cd <path>     change folder\n  type <file>     show a text file      run <file>    start a program\n  ps              processes             threads       kernel threads\n  mem             memory                uptime        time since boot\n  date / time     clock                 ver           version\n  echo <text>     print text            cls           clear the screen\n  exit            close this window",
-            ),
+            "help" | "?" => self.print(TERMINAL_HELP),
             "cls" | "clear" => self.lines.clear(),
             "ver" => {
                 let info = meridian_rt::system_info().ok();
@@ -766,25 +527,27 @@ impl Terminal {
                         self.print(&format!(" Directory of {path}"));
                         self.print("");
                         let mut files = 0;
+                        let mut bytes = 0;
                         for e in &entries {
                             if e.is_dir {
                                 self.print(&format!("  <DIR>          {}", e.name));
                             } else {
                                 files += 1;
+                                bytes += e.size;
                                 self.print(&format!("  {:>14}  {}", e.size, e.name));
                             }
                         }
-                        self.print(&format!("  {} file(s), {} dir(s)", files, entries.len() - files));
+                        self.print(&format!("  {} file(s) {} bytes, {} dir(s)", files, bytes, entries.len() - files));
                     }
                     Err(e) => self.print(&format!("{path}: {}", error_text(e))),
                 }
             }
-            "cd" => {
+            "cd" | "chdir" => {
                 if rest.is_empty() {
                     let cwd = self.cwd.clone();
                     self.print(&cwd);
                 } else {
-                    let path = self.resolve(rest);
+                    let path = self.resolve(&one);
                     match sys::list_directory(&path) {
                         Ok(_) => self.cwd = path,
                         Err(e) => self.print(&format!("{path}: {}", error_text(e))),
@@ -792,7 +555,7 @@ impl Terminal {
                 }
             }
             "type" | "cat" => {
-                let path = self.resolve(rest);
+                let path = self.resolve(&one);
                 match sys::read_file(&path) {
                     Ok(data) => {
                         let text = String::from_utf8_lossy(&data[..data.len().min(16384)]).replace('\r', "");
@@ -801,10 +564,61 @@ impl Terminal {
                     Err(e) => self.print(&format!("{path}: {}", error_text(e))),
                 }
             }
+            "mkdir" | "md" if !one.is_empty() => {
+                let path = self.resolve(&one);
+                if self.report(&path, sys::create_directory(&path)) {
+                    return vec![Action::FilesChanged];
+                }
+            }
+            "del" | "rm" | "erase" | "rmdir" | "rd" if !one.is_empty() => {
+                let path = self.resolve(&one);
+                if self.report(&path, sys::delete_file(&path)) {
+                    return vec![Action::FilesChanged];
+                }
+            }
+            "move" | "mv" | "ren" | "rename" if args.len() == 2 => {
+                let from = self.resolve(&args[0]);
+                let mut to = self.resolve(&args[1]);
+                if cmd.eq_ignore_ascii_case("ren") || cmd.eq_ignore_ascii_case("rename") {
+                    to = join(&parent(&from), &args[1]);
+                } else if sys::list_directory(&to).is_ok() {
+                    to = join(&to, file_name(&from));
+                }
+                if self.report(&from, sys::rename(&from, &to)) {
+                    return vec![Action::FilesChanged];
+                }
+            }
+            "copy" | "cp" if args.len() == 2 => {
+                let from = self.resolve(&args[0]);
+                let mut to = self.resolve(&args[1]);
+                if sys::list_directory(&to).is_ok() {
+                    to = join(&to, file_name(&from));
+                }
+                match sys::read_file(&from) {
+                    Ok(data) => {
+                        if self.report(&to, sys::write_file(&to, &data)) {
+                            self.print(&format!("        1 file(s) copied ({} bytes).", data.len()));
+                            return vec![Action::FilesChanged];
+                        }
+                    }
+                    Err(e) => self.print(&format!("{from}: {}", error_text(e))),
+                }
+            }
+            "drives" | "vol" => {
+                for v in sys::query_volumes() {
+                    let letter = char::from_u32(v.letter).unwrap_or('?');
+                    let rw = if v.flags & volume_flags::WRITABLE != 0 { "read/write" } else { "read-only" };
+                    self.print(&format!(
+                        "  {letter}:  {:<12} {:>10} free of {:>10}  {rw}",
+                        sys::name_of(&v.label),
+                        human_size(v.free_bytes),
+                        human_size(v.total_bytes)
+                    ));
+                }
+            }
             "run" | "start" => {
-                let mut words = rest.split_whitespace();
-                let target = words.next().unwrap_or("");
-                let arg = words.next().and_then(|a| a.parse().ok()).unwrap_or(0);
+                let target = args.first().map(String::as_str).unwrap_or("");
+                let arg = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(0);
                 let path = self.resolve(target);
                 match sys::create_process(&path, arg) {
                     Ok(h) => {
@@ -814,10 +628,35 @@ impl Terminal {
                     Err(e) => self.print(&format!("Could not start {path}: {}", error_text(e))),
                 }
             }
-            "ps" => {
+            "open" if !one.is_empty() => {
+                let path = self.resolve(&one);
+                let is_dir = sys::list_directory(&path).is_ok();
+                match open_path(&path, is_dir) {
+                    Opened::Actions(a) => return a,
+                    Opened::Started(h, name) => {
+                        self.print(&format!("Started {name}"));
+                        self.children.push((h, name));
+                    }
+                    Opened::Message(m) => self.print(&m),
+                }
+            }
+            "notepad" | "edit" => return app(AppKind::Notepad, opt),
+            "paint" | "mspaint" => return app(AppKind::Paint, opt),
+            "photos" => return app(AppKind::Photos, opt),
+            "explorer" => return app(AppKind::Explorer, Some(opt.unwrap_or_else(|| self.cwd.clone()))),
+            "calc" => return app(AppKind::Calculator, None),
+            "taskmgr" => return app(AppKind::TaskManager, None),
+            "settings" | "control" => return app(AppKind::Settings, None),
+            "clock" => return app(AppKind::Clock, None),
+            "winver" => return app(AppKind::About, None),
+            "ps" | "tasklist" => {
                 self.print("  PID   Name              Memory    Handles  Status");
                 for p in sys::query_processes() {
-                    let status = if p.running != 0 { "running".to_string() } else { format!("exited {:#x}", p.exit_status as u32) };
+                    let status = if p.running != 0 {
+                        "running".to_string()
+                    } else {
+                        format!("exited {:#x}", p.exit_status as u32)
+                    };
                     self.print(&format!(
                         "  {:<5} {:<17} {:>6} KB  {:>7}  {}",
                         p.id,
@@ -831,7 +670,8 @@ impl Terminal {
             "threads" => {
                 self.print("  ID    Name                     Prio  State     CPU  Time");
                 for t in sys::query_threads() {
-                    let state = ["init", "ready", "running", "waiting", "done"].get(t.state as usize).copied().unwrap_or("?");
+                    let state =
+                        ["init", "ready", "running", "waiting", "done"].get(t.state as usize).copied().unwrap_or("?");
                     self.print(&format!(
                         "  {:<5} {:<24} {:>4}  {:<8} {:>4}  {}.{:03}s",
                         t.id,
@@ -860,9 +700,16 @@ impl Terminal {
             }
             "date" | "time" => {
                 let t = sys::query_time();
-                self.print(&format!("  {:04}-{:02}-{:02} {:02}:{:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second));
+                self.print(&format!(
+                    "  {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    t.year, t.month, t.day, t.hour, t.minute, t.second
+                ));
             }
             "exit" => return vec![Action::Close],
+            "mkdir" | "md" | "del" | "rm" | "erase" | "rmdir" | "rd" | "open" => {
+                self.print(&format!("usage: {cmd} <path>"));
+            }
+            "move" | "mv" | "ren" | "rename" | "copy" | "cp" => self.print(&format!("usage: {cmd} <from> <to>")),
             other => self.print(&format!("'{other}' is not a command. Type 'help'.")),
         }
         Vec::new()
@@ -874,24 +721,28 @@ impl App for Terminal {
         AppKind::Terminal
     }
     fn title(&self) -> String {
-        "Terminal".into()
+        format!("Terminal - {}", self.cwd)
     }
     fn size(&self) -> (i32, i32) {
-        (760, 460)
+        (780, 470)
     }
 
     fn draw(&mut self, cv: &mut Canvas, r: Rect, cx: &mut Ctx) {
         cv.fill(r, rgb(0x0C, 0x0C, 0x0C));
         self.rows = ((r.h - 12) / MONO_H).max(1) as usize;
+        let cols = ((r.w - 16) / MONO_W).max(10) as usize;
         let prompt = format!("{}> {}", self.cwd, self.input);
         let start = (self.lines.len() + 1).saturating_sub(self.rows);
         let mut y = r.y + 6;
         for line in self.lines.iter().skip(start) {
-            cx.mono.draw(cv, r.x + 8, y, line, rgb(0xCC, 0xCC, 0xCC));
+            let shown: String = line.chars().take(cols).collect();
+            cx.mono.draw(cv, r.x + 8, y, &shown, rgb(0xCC, 0xCC, 0xCC));
             y += MONO_H;
         }
-        cx.mono.draw(cv, r.x + 8, y, &prompt, rgb(0xF2, 0xF2, 0xF2));
-        let caret_x = r.x + 8 + prompt.chars().count() as i32 * MONO_W;
+        let skip = prompt.chars().count().saturating_sub(cols - 1);
+        let shown: String = prompt.chars().skip(skip).collect();
+        cx.mono.draw(cv, r.x + 8, y, &shown, rgb(0xF2, 0xF2, 0xF2));
+        let caret_x = r.x + 8 + shown.chars().count() as i32 * MONO_W;
         cv.fill(Rect::new(caret_x, y + MONO_H - 3, MONO_W, 2), rgb(0xF2, 0xF2, 0xF2));
     }
 
@@ -899,11 +750,39 @@ impl App for Terminal {
         Vec::new()
     }
 
-    fn key(&mut self, e: &InputEvent, _cx: &mut Ctx) -> Vec<Action> {
+    fn right_click(&mut self, x: i32, y: i32, cx: &mut Ctx) -> Vec<Action> {
+        vec![Action::Menu(
+            vec![MenuItem::when("Paste", 1, !cx.clipboard.text.is_empty()), MenuItem::new("Clear", 2)],
+            x,
+            y,
+        )]
+    }
+
+    fn menu(&mut self, id: u32, cx: &mut Ctx) -> Vec<Action> {
+        match id {
+            1 => self.paste(cx),
+            2 => self.lines.clear(),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn key(&mut self, e: &InputEvent, cx: &mut Ctx) -> Vec<Action> {
+        if ctrl(e, 'v') {
+            self.paste(cx);
+            return Vec::new();
+        }
+        if ctrl(e, 'l') {
+            self.lines.clear();
+            return Vec::new();
+        }
+        if e.flags & input::CTRL != 0 && e.key == key::CHAR {
+            return Vec::new();
+        }
         match e.key {
             key::CHAR => {
                 if let Some(c) = char::from_u32(e.ch) {
-                    if self.input.len() < 200 {
+                    if self.input.len() < 400 {
                         self.input.push(c);
                     }
                 }
@@ -911,10 +790,23 @@ impl App for Terminal {
             key::BACKSPACE => {
                 self.input.pop();
             }
+            key::ESCAPE => self.input.clear(),
+            key::UP if self.history_pos > 0 => {
+                self.history_pos -= 1;
+                self.input = self.history[self.history_pos].clone();
+            }
+            key::DOWN if self.history_pos < self.history.len() => {
+                self.history_pos += 1;
+                self.input = self.history.get(self.history_pos).cloned().unwrap_or_default();
+            }
             key::ENTER => {
                 let line = core::mem::take(&mut self.input);
                 let echo = format!("{}> {line}", self.cwd);
                 self.print(&echo);
+                if !line.trim().is_empty() && self.history.last() != Some(&line) {
+                    self.history.push(line.clone());
+                }
+                self.history_pos = self.history.len();
                 return self.run_command(&line);
             }
             _ => {}
@@ -936,6 +828,15 @@ impl App for Terminal {
             self.print(&line);
         }
         changed
+    }
+}
+
+impl Terminal {
+    fn paste(&mut self, cx: &mut Ctx) {
+        let room = 400usize.saturating_sub(self.input.len());
+        let text: String =
+            cx.clipboard.text.lines().next().unwrap_or("").chars().filter(|c| !c.is_control()).take(room).collect();
+        self.input.push_str(&text);
     }
 }
 
@@ -1169,7 +1070,7 @@ pub struct Settings {
     w: i32,
 }
 
-const PAGES: [&str; 3] = ["Personalisation", "System", "About"];
+const PAGES: [&str; 4] = ["Personalisation", "Storage", "System", "About"];
 
 impl Settings {
     fn new() -> Self {
@@ -1277,13 +1178,41 @@ impl App for Settings {
                     cv,
                     x0,
                     r.y + 482,
-                    "Changes apply immediately. They last until restart: Meridian cannot save settings until its storage is writable.",
+                    "Changes apply immediately and are saved on drive D: (D:\\Meridian\\settings.ini).",
                     12,
                     Weight::Regular,
                     t.text_dim(),
                 );
             }
             1 => {
+                let volumes = sys::query_volumes();
+                if volumes.is_empty() {
+                    f.draw(cv, x0, r.y + 80, "No drives are mounted.", 14, Weight::Regular, t.text_dim());
+                }
+                for (i, v) in volumes.iter().enumerate() {
+                    let c = card(cv, r.y + 70 + i as i32 * 96, 84);
+                    let letter = char::from_u32(v.letter).unwrap_or('?');
+                    let writable = v.flags & volume_flags::WRITABLE != 0;
+                    ui::icon(cv, Icon::Drive, c.x + 16, c.y + 20, 40, &t);
+                    let name = if writable { format!("Data ({letter}:)") } else { format!("Boot disk ({letter}:)") };
+                    let title = format!("{name}  -  {}", sys::name_of(&v.label));
+                    f.draw(cv, c.x + 72, c.y + 12, &title, 14, Weight::Semibold, t.text());
+                    let bar = Rect::new(c.x + 72, c.y + 40, c.w - 100, 10);
+                    cv.fill_rounded(bar, 5, t.hover());
+                    let used = v.total_bytes.saturating_sub(v.free_bytes);
+                    let fill = (bar.w as u64 * used / v.total_bytes.max(1)) as i32;
+                    let color = if used * 10 > v.total_bytes * 9 { t.danger() } else { t.accent };
+                    cv.fill_rounded(Rect::new(bar.x, bar.y, fill.max(10), bar.h), 5, color);
+                    let detail = format!(
+                        "{} free of {}  -  {}",
+                        human_size(v.free_bytes),
+                        human_size(v.total_bytes),
+                        if writable { "you can save files here" } else { "read-only" }
+                    );
+                    f.draw(cv, c.x + 72, c.y + 58, &detail, 12, Weight::Regular, t.text_dim());
+                }
+            }
+            2 => {
                 let info = meridian_rt::system_info().ok();
                 let (w, h) = crate::screen_size();
                 let rows = [
@@ -1295,8 +1224,8 @@ impl App for Settings {
                             format!("{} MiB ({} MiB free)", i.physical_memory >> 20, i.available_memory >> 20)
                         }),
                     ),
-                    ("Storage", "SATA (AHCI), FAT32, read-only".to_string()),
-                    ("Input", "PS/2 keyboard and mouse".to_string()),
+                    ("Storage", "SATA (AHCI) disks, FAT32; C: read-only boot disk, D: writable data drive".to_string()),
+                    ("Input", "PS/2 keyboard and mouse (absolute pointer in virtual machines)".to_string()),
                 ];
                 for (i, (k, v)) in rows.iter().enumerate() {
                     let c = card(cv, r.y + 70 + i as i32 * 60, 52);
