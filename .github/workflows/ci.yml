@@ -38,7 +38,9 @@ jobs:
             'type "C:\Welcome to Meridian.txt"' 'run C:\MERIDIAN\INIT.EXE' shutdown --release --expect-poweroff
 
       - name: Desktop walk-through (mouse and keyboard), ending in Start > Shut down
-        run: python3 tools/mbuild.py ui --release --expect-poweroff
+        # Relative PS/2 pointer: the absolute vmmouse pointer misplaces the
+        # cursor under Ubuntu 24.04's QEMU 8.2 (it works under QEMU 11).
+        run: python3 tools/mbuild.py ui --release --expect-poweroff --cmdline novmmouse
 
       - name: Upload logs, screenshots and disk image
         if: always()
@@ -49,5 +51,5 @@ jobs:
             build/*.log
             build/*.png
             build/ui/*.png
-            build/meridian.img
+            build/ui.img
           if-no-files-found: ignore

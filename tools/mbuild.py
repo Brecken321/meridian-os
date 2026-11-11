@@ -18,7 +18,10 @@ The disk image is a GPT disk with one EFI System Partition (FAT32) holding
   MERIDIAN/KERNEL.ELF    the kernel
   MERIDIAN/CMDLINE.TXT   kernel command line
   MERIDIAN/INIT.EXE      first user-mode program (PE32+)
-It never touches real disks: it is only ever written to build/meridian.img.
+It never touches real disks: it only writes disk images inside build/.
+`run`, `demo` and `build` use build/meridian.img; every automated command
+(test, ui, screenshot, exec) boots its own copy (build/<command>.img), so
+tests can run while a Meridian window is open.
 """
 
 import argparse
@@ -65,6 +68,7 @@ USER_LINK_FLAGS = [
 
 
 QUIET = False
+IMAGE = "meridian.img"  # disk image inside build/ for this command (see main)
 
 
 def show(*parts) -> None:
@@ -380,7 +384,7 @@ def find_firmware(qemu: str) -> tuple[Path, Path]:
 def qemu_command(args, headless: bool, extra: list[str]) -> list[str]:
     qemu = find_qemu()
     code, variables = find_firmware(qemu)
-    vars_copy = BUILD / "ovmf-vars.fd"
+    vars_copy = BUILD / f"{Path(IMAGE).stem}-vars.fd"
     shutil.copyfile(variables, vars_copy)
     cmd = [
         qemu,
@@ -389,8 +393,8 @@ def qemu_command(args, headless: bool, extra: list[str]) -> list[str]:
         "-smp", str(args.smp),
         "-m", args.memory,
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
-        "-drive", "if=pflash,format=raw,unit=1,file=ovmf-vars.fd",
-        "-drive", "format=raw,file=meridian.img",
+        "-drive", f"if=pflash,format=raw,unit=1,file={vars_copy.name}",
+        "-drive", f"format=raw,file={IMAGE}",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
         "-rtc", "base=localtime",
     ]
@@ -404,7 +408,7 @@ def qemu_command(args, headless: bool, extra: list[str]) -> list[str]:
 
 def prepare(args, cmdline: str) -> None:
     boot, kernel, programs = cargo_build(args.release)
-    make_image(boot, kernel, programs, cmdline.strip(), BUILD / "meridian.img")
+    make_image(boot, kernel, programs, cmdline.strip(), BUILD / IMAGE)
 
 
 def cmd_build(args) -> int:
@@ -583,33 +587,67 @@ def qemu_abs(x: int, y: int, width: int, height: int) -> list[dict]:
             {"type": "abs", "data": {"axis": "y", "value": -(-y * 0x8000 // height)}}]
 
 
-def ui_commands(action: str, width: int, height: int) -> list[dict]:
+def qmp_events(*events) -> dict:
+    return {"execute": "input-send-event", "arguments": {"events": list(events)}}
+
+
+def qmp_button(name: str, down: bool) -> dict:
+    return {"type": "btn", "data": {"down": down, "button": name}}
+
+
+class Pointer:
+    """Moves the guest's pointer. With the absolute (vmmouse) mouse a move is
+    one event; with a plain relative PS/2 mouse the pointer is first pushed
+    into the top-left corner, then stepped to the target, so its position is
+    always known exactly."""
+
+    STEP = 120
+
+    def __init__(self, width: int, height: int, absolute: bool):
+        self.width, self.height, self.absolute = width, height, absolute
+        self.x, self.y = width // 2, height // 2
+
+    def _steps(self, dx: int, dy: int) -> list[dict]:
+        out = []
+        while dx or dy:
+            sx = max(-self.STEP, min(self.STEP, dx))
+            sy = max(-self.STEP, min(self.STEP, dy))
+            out.append(qmp_events({"type": "rel", "data": {"axis": "x", "value": sx}},
+                                  {"type": "rel", "data": {"axis": "y", "value": sy}}))
+            dx, dy = dx - sx, dy - sy
+        return out
+
+    def to(self, x: int, y: int, pin: bool = True) -> list[dict]:
+        if self.absolute:
+            out = [qmp_events(*qemu_abs(x, y, self.width, self.height))]
+        elif pin:
+            out = self._steps(-self.width - 64, -self.height - 64) + self._steps(x, y)
+        else:
+            out = self._steps(x - self.x, y - self.y)
+        self.x, self.y = x, y
+        return out
+
+
+def ui_commands(action: str, pointer: Pointer) -> list[dict]:
     """QMP commands for one `ui` action (see cmd_ui)."""
     verb, _, rest = action.partition(" ")
     nums = [int(v) for v in rest.split()] if verb in ("click", "dclick", "rclick", "move", "drag", "wheel") else []
-
-    def send(*events):
-        return {"execute": "input-send-event", "arguments": {"events": list(events)}}
-
-    def button(name, down):
-        return {"type": "btn", "data": {"down": down, "button": name}}
-
     if verb == "move":
-        return [send(*qemu_abs(*nums, width, height))]
+        return pointer.to(*nums)
     if verb in ("click", "dclick", "rclick"):
         name = "right" if verb == "rclick" else "left"
         clicks = 2 if verb == "dclick" else 1
-        return [send(*qemu_abs(*nums, width, height))] + [send(button(name, d)) for _ in range(clicks) for d in (True, False)]
+        return pointer.to(*nums) + [qmp_events(qmp_button(name, d)) for _ in range(clicks) for d in (True, False)]
     if verb == "drag":
         x1, y1, x2, y2 = nums
-        steps = [send(*qemu_abs(x1, y1, width, height)), send(button("left", True))]
+        steps = pointer.to(x1, y1) + [qmp_events(qmp_button("left", True))]
         for i in range(1, 9):
-            steps.append(send(*qemu_abs(x1 + (x2 - x1) * i // 8, y1 + (y2 - y1) * i // 8, width, height)))
-        return steps + [send(button("left", False))]
+            steps += pointer.to(x1 + (x2 - x1) * i // 8, y1 + (y2 - y1) * i // 8, pin=False)
+        return steps + [qmp_events(qmp_button("left", False))]
     if verb == "wheel":
         x, y, n = nums
         name = "wheel-down" if n > 0 else "wheel-up"
-        return [send(*qemu_abs(x, y, width, height))] + [send(button(name, d)) for _ in range(abs(n)) for d in (True, False)]
+        return pointer.to(x, y) + [qmp_events(qmp_button(name, d)) for _ in range(abs(n)) for d in (True, False)]
     if verb == "type":
         return key_events(unescape(rest))
     if verb == "key":
@@ -645,6 +683,9 @@ def cmd_ui(args) -> int:
             print("error: the desktop did not start")
             return 1
         time.sleep(args.settle)
+        absolute = "mouse in absolute mode" in log.read_text(errors="replace")
+        pointer = Pointer(width, height, absolute)
+        print(f"pointer: {'absolute (vmmouse)' if absolute else 'relative PS/2'}")
         for action in args.commands or UI_STEPS:
             if proc.poll() is not None:
                 break
@@ -659,7 +700,7 @@ def cmd_ui(args) -> int:
                 print(f"saved {out.relative_to(ROOT)}")
             else:
                 try:
-                    qmp(port, ui_commands(action, width, height), pause=0.05)
+                    qmp(port, ui_commands(action, pointer), pause=0.03)
                 except OSError:
                     # The guest may have powered off (Start > Shut down).
                     try:
@@ -838,8 +879,9 @@ def main() -> int:
     parser.add_argument("--settle", type=float, default=1.0, help="screenshot: seconds to wait after boot")
     parser.add_argument("--out", default=str(BUILD / "screenshot.png"), help="screenshot output file")
     args = parser.parse_args()
-    global QUIET
+    global QUIET, IMAGE
     QUIET = args.quiet
+    IMAGE = "meridian.img" if args.command in ("build", "run", "demo") else f"{args.command}.img"
     BUILD.mkdir(exist_ok=True)
     return {"build": cmd_build, "run": cmd_run, "test": cmd_test, "screenshot": cmd_screenshot,
             "exec": cmd_exec, "ui": cmd_ui, "demo": cmd_demo, "clean": cmd_clean}[args.command](args)
