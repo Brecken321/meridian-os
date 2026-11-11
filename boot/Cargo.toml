@@ -1,0 +1,15 @@
+[package]
+name = "meridian-boot"
+description = "Meridian Boot Manager: UEFI application that loads the Meridian kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bootx64"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+meridian-bootinfo = { path = "../shared/bootinfo" }

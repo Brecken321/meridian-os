@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["boot", "kernel", "runtime/rt", "shared/abi", "shared/bootinfo", "system/desktop", "system/init"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/Brecken321/meridian-os"
+
+[profile.dev]
+# Unoptimised kernel code is painfully slow under QEMU's TCG emulator.
+opt-level = 1
+# Kernel, boot manager and Meridian programs never unwind.
+panic = "abort"
+# Keep build output small: line tables are enough for stack traces and
+# tools/symbolize.py, and incremental caches are large for little gain on
+# crates this size.
+debug = "line-tables-only"
+incremental = false
+
+[profile.release]
+debug = "line-tables-only"
+panic = "abort"

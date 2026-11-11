@@ -1,0 +1,9 @@
+# The kernel is linked at 0xFFFFFFFF80000000 (top 2 GiB), so it uses the
+# "kernel" code model and is not position independent. Frame pointers are kept
+# so the panic screen can print a stack backtrace.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "code-model=kernel",
+    "-C", "relocation-model=static",
+    "-C", "force-frame-pointers=yes",
+]

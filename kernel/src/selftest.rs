@@ -1,0 +1,971 @@
+//! In-kernel self tests.
+//!
+//! Booting with `selftest` on the kernel command line runs every test below
+//! on the real kernel (under QEMU in CI), prints one machine-readable line
+//! per test and exits QEMU with a pass/fail code. The same tests can be run
+//! interactively with the shell's `selftest` command.
+
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use crate::arch::x86_64::idt::{self, TrapFrame, fixup};
+use crate::arch::x86_64::{apic, cpu};
+use crate::hal::{acpi, hpet, pci};
+use crate::ke::dpc::Dpc;
+use crate::ke::objects::{Event, Mutex, Semaphore};
+use crate::ke::sched::{self, WaitStatus};
+use crate::ke::thread::{Thread, ThreadState, priority};
+use crate::ke::{clock, irql};
+use crate::mm::{PAGE_SIZE, kva, paging, phys_to_virt, pmm};
+use crate::sync::SpinLock;
+
+type TestResult = Result<(), String>;
+
+struct Test {
+    name: &'static str,
+    run: fn() -> TestResult,
+}
+
+macro_rules! ensure {
+    ($cond:expr, $($fmt:tt)*) => {
+        if !$cond {
+            return Err(format!($($fmt)*));
+        }
+    };
+}
+
+const TESTS: &[Test] = &[
+    Test { name: "pmm.alloc_free", run: pmm_alloc_free },
+    Test { name: "pmm.contiguous", run: pmm_contiguous },
+    Test { name: "heap.collections", run: heap_collections },
+    Test { name: "heap.large", run: heap_large },
+    Test { name: "heap.alignment", run: heap_alignment },
+    Test { name: "paging.map_unmap", run: paging_map_unmap },
+    Test { name: "paging.guard_page_probe", run: guard_page_probe },
+    Test { name: "paging.kernel_protection", run: kernel_protection },
+    Test { name: "trap.breakpoint", run: breakpoint },
+    Test { name: "trap.noncanonical_probe", run: noncanonical_probe },
+    Test { name: "irql.raise_lower", run: irql_raise_lower },
+    Test { name: "sync.spinlock_irql", run: spinlock_irql },
+    Test { name: "apic.self_ipi", run: apic_self_ipi },
+    Test { name: "clock.ticks", run: clock_ticks },
+    Test { name: "clock.tsc_calibrated", run: tsc_calibrated },
+    Test { name: "hpet.counter", run: hpet_counter },
+    Test { name: "acpi.tables", run: acpi_tables },
+    Test { name: "pci.enumeration", run: pci_enumeration },
+    Test { name: "ps2.decode", run: ps2_decode },
+    Test { name: "dpc.deferred_until_irql_drops", run: dpc_deferred },
+    Test { name: "sched.spawn_join", run: sched_spawn_join },
+    Test { name: "sched.many_threads", run: sched_many_threads },
+    Test { name: "sched.time_slicing", run: sched_time_slicing },
+    Test { name: "sched.priority_preemption", run: sched_priority_preemption },
+    Test { name: "sched.sleep", run: sched_sleep },
+    Test { name: "sched.stack_reclaimed", run: sched_stack_reclaimed },
+    Test { name: "sync.event", run: sync_event },
+    Test { name: "sync.event_timeout", run: sync_event_timeout },
+    Test { name: "sync.notification_event", run: sync_notification_event },
+    Test { name: "sync.mutex", run: sync_mutex },
+    Test { name: "sync.semaphore", run: sync_semaphore },
+    Test { name: "smp.processors_online", run: smp_processors_online },
+    Test { name: "smp.cross_call", run: smp_cross_call },
+    Test { name: "smp.tlb_shootdown", run: smp_tlb_shootdown },
+    Test { name: "smp.parallel_threads", run: smp_parallel_threads },
+    Test { name: "pe.rejects_bad_images", run: pe_rejects_bad_images },
+    Test { name: "user.init_self_check", run: user_init_self_check },
+    Test { name: "user.fault_isolated", run: user_fault_isolated },
+    Test { name: "user.privileged_instruction", run: user_privileged_instruction },
+    Test { name: "user.kernel_memory_protected", run: user_kernel_memory_protected },
+    Test { name: "user.memory_reclaimed", run: user_memory_reclaimed },
+    Test { name: "ahci.disk_readable", run: ahci_disk_readable },
+    Test { name: "gpt.esp_found", run: gpt_esp_found },
+    Test { name: "fat.root_listing", run: fat_root_listing },
+    Test { name: "fat.file_matches_boot_module", run: fat_file_matches_module },
+    Test { name: "fat.long_file_name", run: fat_long_file_name },
+    Test { name: "fat.errors", run: fat_errors },
+    Test { name: "fat.write_read_back", run: fat_write_read_back },
+    Test { name: "fat.rename_move_delete", run: fat_rename_move_delete },
+    Test { name: "fat.directory_growth", run: fat_directory_growth },
+    Test { name: "fat.write_protection", run: fat_write_protection },
+    Test { name: "user.run_from_disk", run: user_run_from_disk },
+];
+
+/// Runs every test; returns (passed, failed).
+pub fn run_all() -> (usize, usize) {
+    let (mut passed, mut failed) = (0, 0);
+    crate::kprintln!("[selftest] running {} tests", TESTS.len());
+    for test in TESTS {
+        match (test.run)() {
+            Ok(()) => {
+                passed += 1;
+                crate::kprintln!("[selftest] \x1b[92mPASS\x1b[0m {}", test.name);
+            }
+            Err(why) => {
+                failed += 1;
+                crate::kprintln!("[selftest] \x1b[91mFAIL\x1b[0m {}: {}", test.name, why);
+            }
+        }
+    }
+    crate::kprintln!("[selftest] SUMMARY passed={} failed={}", passed, failed);
+    if failed == 0 {
+        crate::kprintln!("SELFTEST: ALL PASSED");
+    } else {
+        crate::kprintln!("SELFTEST: FAILURES");
+    }
+    (passed, failed)
+}
+
+fn pmm_alloc_free() -> TestResult {
+    let (free_before, owned) = pmm::stats();
+    ensure!(free_before <= owned, "free memory ({free_before}) exceeds owned memory ({owned})");
+    let mut frames = Vec::new();
+    for _ in 0..64 {
+        let pa = pmm::alloc_frame().ok_or("out of frames")?;
+        ensure!(pa % PAGE_SIZE == 0, "frame {pa:#x} is not page aligned");
+        ensure!(pa >= 0x10_0000, "frame {pa:#x} is below 1 MiB");
+        frames.push(pa);
+    }
+    let mut sorted = frames.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    ensure!(sorted.len() == frames.len(), "allocator returned a frame twice");
+    for pa in frames {
+        pmm::free_frame(pa);
+    }
+    let (free_after, _) = pmm::stats();
+    ensure!(free_after == free_before, "leaked {} bytes", free_before as i64 - free_after as i64);
+    Ok(())
+}
+
+fn pmm_contiguous() -> TestResult {
+    let pa = pmm::alloc_contiguous(16, 16).ok_or("no 64 KiB contiguous block")?;
+    ensure!(pa % (16 * PAGE_SIZE) == 0, "block {pa:#x} is not 64 KiB aligned");
+    // Write the whole block through the direct map to prove it is real RAM.
+    let p = phys_to_virt(pa) as *mut u64;
+    for i in 0..(16 * PAGE_SIZE as usize / 8) {
+        // SAFETY: inside the block we own.
+        unsafe { p.add(i).write_volatile(i as u64) };
+    }
+    for i in 0..(16 * PAGE_SIZE as usize / 8) {
+        ensure!(unsafe { p.add(i).read_volatile() } == i as u64, "readback mismatch at word {i}");
+    }
+    pmm::free_frames(pa, 16);
+    Ok(())
+}
+
+fn heap_collections() -> TestResult {
+    let boxed = Box::new(0xDEAD_BEEF_u64);
+    ensure!(*boxed == 0xDEAD_BEEF, "box content corrupted");
+    let v: Vec<u64> = (0..10_000).collect();
+    ensure!(v.iter().sum::<u64>() == 49_995_000, "vector sum wrong");
+    let mut map = BTreeMap::new();
+    for i in 0..1000u32 {
+        map.insert(i.wrapping_mul(2_654_435_761), i);
+    }
+    ensure!(map.len() == 1000, "map lost entries");
+    ensure!(map.values().map(|&v| v as u64).sum::<u64>() == 499_500, "map values corrupted");
+    let s = format!("{}-{:x}", "meridian", 0xC0FFEE);
+    ensure!(s == "meridian-c0ffee", "formatting produced {s}");
+    Ok(())
+}
+
+fn heap_large() -> TestResult {
+    let (in_use_before, _, _) = crate::mm::heap::stats();
+    {
+        let mut big = alloc::vec![0u8; 1 << 20];
+        for (i, b) in big.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        ensure!(big.iter().enumerate().all(|(i, &b)| b == (i % 251) as u8), "1 MiB buffer corrupted");
+    }
+    let (in_use_after, _, _) = crate::mm::heap::stats();
+    ensure!(in_use_after == in_use_before, "large allocation was not released");
+    Ok(())
+}
+
+fn heap_alignment() -> TestResult {
+    use core::alloc::Layout;
+    for align in [8usize, 64, 256, 4096, 16384] {
+        let layout = Layout::from_size_align(align / 2 + 1, align).unwrap();
+        // SAFETY: matching alloc/dealloc with the same layout.
+        let p = unsafe { alloc::alloc::alloc(layout) };
+        ensure!(!p.is_null(), "allocation with align {align} failed");
+        ensure!(p as usize % align == 0, "pointer {p:p} not aligned to {align}");
+        unsafe { alloc::alloc::dealloc(p, layout) };
+    }
+    Ok(())
+}
+
+fn paging_map_unmap() -> TestResult {
+    let va = kva::reserve(1).ok_or("no kernel address space")?;
+    let pa = pmm::alloc_zeroed_frame().ok_or("out of frames")?;
+    paging::map_kernel(va, pa, paging::WRITABLE | paging::NO_EXECUTE).map_err(|e| format!("map failed: {e:?}"))?;
+    // SAFETY: freshly mapped page.
+    unsafe { (va as *mut u64).write_volatile(0x4D45_5249_4449_414E) };
+    let through_direct_map = unsafe { (phys_to_virt(pa) as *const u64).read_volatile() };
+    ensure!(through_direct_map == 0x4D45_5249_4449_414E, "write not visible through the direct map");
+    let (tpa, flags) = paging::translate(paging::kernel_pml4(), va).ok_or("translate failed")?;
+    ensure!(tpa == pa, "translate returned {tpa:#x}, expected {pa:#x}");
+    ensure!(flags & paging::NO_EXECUTE != 0, "NX bit missing");
+    ensure!(paging::map_kernel(va, pa, paging::WRITABLE) == Err(paging::MapError::AlreadyMapped), "double map allowed");
+    ensure!(paging::unmap_kernel(va) == Some(pa), "unmap returned the wrong frame");
+    ensure!(paging::translate(paging::kernel_pml4(), va).is_none(), "page still mapped");
+    ensure!(fixup::read_u64(va).is_none(), "unmapped page is still readable (stale TLB?)");
+    pmm::free_frame(pa);
+    kva::release(va, 1);
+    Ok(())
+}
+
+fn guard_page_probe() -> TestResult {
+    let stack = kva::alloc_stack(4).ok_or("cannot allocate a kernel stack")?;
+    ensure!(fixup::read_u64(stack.base).is_some(), "stack page unreadable");
+    ensure!(fixup::read_u64(stack.base - 8).is_none(), "guard page below the stack is mapped");
+    kva::free_stack(stack);
+    Ok(())
+}
+
+fn kernel_protection() -> TestResult {
+    unsafe extern "C" {
+        static __kernel_start: u8;
+    }
+    let text = &raw const __kernel_start as u64;
+    let (_, flags) = paging::translate(paging::kernel_pml4(), text).ok_or("kernel text not mapped")?;
+    ensure!(flags & paging::WRITABLE == 0, "kernel code is writable");
+    ensure!(flags & paging::NO_EXECUTE == 0, "kernel code is not executable");
+    ensure!(cpu::read_cr0() & (1 << 16) != 0, "CR0.WP is off");
+    let (_, flags) = paging::translate(paging::kernel_pml4(), phys_to_virt(0x10_0000)).ok_or("direct map missing")?;
+    ensure!(flags & paging::NO_EXECUTE != 0, "direct map is executable");
+    ensure!(paging::translate(paging::kernel_pml4(), 0x10_0000).is_none(), "boot identity map still present");
+    Ok(())
+}
+
+fn breakpoint() -> TestResult {
+    let before = idt::BREAKPOINTS.load(Ordering::Relaxed);
+    // SAFETY: int3 is handled and returns.
+    unsafe { core::arch::asm!("int3") };
+    ensure!(idt::BREAKPOINTS.load(Ordering::Relaxed) == before + 1, "breakpoint handler did not run");
+    Ok(())
+}
+
+fn noncanonical_probe() -> TestResult {
+    ensure!(fixup::read_u64(0x8000_0000_0000_0000).is_none(), "non-canonical read did not fault");
+    ensure!(fixup::read_u64(0).is_none(), "null page is mapped");
+    Ok(())
+}
+
+fn irql_raise_lower() -> TestResult {
+    ensure!(irql::current() == irql::PASSIVE_LEVEL, "tests must start at PASSIVE_LEVEL");
+    let old = irql::raise(irql::DISPATCH_LEVEL);
+    ensure!(irql::current() == irql::DISPATCH_LEVEL, "raise to DISPATCH failed");
+    let mid = irql::raise(irql::HIGH_LEVEL);
+    ensure!(mid == irql::DISPATCH_LEVEL && irql::current() == irql::HIGH_LEVEL, "raise to HIGH failed");
+    irql::lower(mid);
+    irql::lower(old);
+    ensure!(irql::current() == irql::PASSIVE_LEVEL, "lower did not restore PASSIVE_LEVEL");
+    Ok(())
+}
+
+fn spinlock_irql() -> TestResult {
+    static LOCK: SpinLock<u32> = SpinLock::new(0);
+    {
+        let mut g = LOCK.lock();
+        *g += 1;
+        ensure!(irql::current() == irql::DISPATCH_LEVEL, "spin lock did not raise IRQL");
+        ensure!(LOCK.try_lock_at(irql::DISPATCH_LEVEL).is_none(), "lock acquired twice");
+    }
+    ensure!(irql::current() == irql::PASSIVE_LEVEL, "IRQL not restored after unlock");
+    ensure!(*LOCK.lock() == 1, "protected value wrong");
+    Ok(())
+}
+
+static TEST_IPI_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn test_ipi_handler(_: &mut TrapFrame) {
+    TEST_IPI_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+fn apic_self_ipi() -> TestResult {
+    const VECTOR: u8 = 0x5E;
+    ensure!(cpu::interrupts_enabled(), "interrupts are disabled");
+    ensure!(idt::register(VECTOR, test_ipi_handler), "test vector busy");
+    let before = TEST_IPI_COUNT.load(Ordering::Relaxed);
+    // While at DISPATCH_LEVEL the interrupt (IRQL 5) must stay pending...
+    let old = irql::raise(irql::HIGH_LEVEL);
+    apic::self_ipi(VECTOR);
+    clock::busy_wait_us(1000);
+    let masked_ok = TEST_IPI_COUNT.load(Ordering::Relaxed) == before;
+    // ...and be delivered as soon as the IRQL drops.
+    irql::lower(old);
+    clock::busy_wait_us(1000);
+    let delivered = TEST_IPI_COUNT.load(Ordering::Relaxed) == before + 1;
+    idt::unregister(VECTOR);
+    ensure!(masked_ok, "interrupt delivered while masked by IRQL");
+    ensure!(delivered, "self-IPI was not delivered after lowering IRQL");
+    Ok(())
+}
+
+fn clock_ticks() -> TestResult {
+    let t0 = clock::ticks();
+    let u0 = clock::uptime_us();
+    clock::busy_wait_us(200_000);
+    let dt = clock::ticks() - t0;
+    let du = clock::uptime_us() - u0;
+    ensure!(du >= 200_000, "uptime advanced only {du} us");
+    // Emulators can deliver ticks late: QEMU on a Windows host fires its
+    // timers at the host's timer resolution, 15.6 ms by default, so only
+    // ~13 of the 200 ticks may arrive. Require a sane range, not precision.
+    ensure!((8..=2000).contains(&dt), "{dt} clock ticks in 200 ms (expected 13 to 200)");
+    Ok(())
+}
+
+fn tsc_calibrated() -> TestResult {
+    let khz = clock::tsc_khz();
+    ensure!(khz > 10_000, "TSC frequency {khz} kHz is implausible");
+    ensure!(apic::timer_ticks_per_ms() > 0, "APIC timer not calibrated");
+    Ok(())
+}
+
+fn hpet_counter() -> TestResult {
+    let Some(h) = hpet::get() else { return Ok(()) };
+    let a = h.counter();
+    clock::busy_wait_us(100);
+    ensure!(h.counter() != a, "HPET counter is not running");
+    Ok(())
+}
+
+fn acpi_tables() -> TestResult {
+    let a = acpi::get().ok_or("ACPI was not initialised")?;
+    let madt = a.madt.as_ref().ok_or("no MADT")?;
+    ensure!(!madt.cpus.is_empty(), "MADT lists no processors");
+    ensure!(!madt.ioapics.is_empty(), "MADT lists no I/O APIC");
+    ensure!(a.fadt.is_some(), "no FADT");
+    Ok(())
+}
+
+fn pci_enumeration() -> TestResult {
+    let devices = pci::devices();
+    ensure!(!devices.is_empty(), "no PCI devices found");
+    ensure!(devices.iter().any(|d| d.class == 0x06 && d.subclass == 0x00), "no host bridge found");
+    Ok(())
+}
+
+fn ps2_decode() -> TestResult {
+    use crate::drivers::ps2::{self, Key};
+    while ps2::read_event().is_some() {}
+    // Shift down, 'a' down/up, shift up, extended up-arrow down.
+    for b in [0x2A, 0x1E, 0x9E, 0xAA, 0xE0, 0x48] {
+        ps2::inject_scancode(b);
+    }
+    let e = ps2::read_event().ok_or("no event")?; // shift
+    ensure!(e.key == Key::Modifier, "expected modifier, got {:?}", e.key);
+    let e = ps2::read_event().ok_or("no event")?;
+    ensure!(e.key == Key::Char('A') && e.pressed && e.shift, "expected shifted 'A', got {e:?}");
+    let e = ps2::read_event().ok_or("no event")?;
+    ensure!(!e.pressed, "expected key release");
+    ps2::read_event(); // shift release
+    let e = ps2::read_event().ok_or("no event")?;
+    ensure!(e.key == Key::Up, "expected Up, got {:?}", e.key);
+    Ok(())
+}
+
+static DPC_RUNS: AtomicU64 = AtomicU64::new(0);
+static TEST_DPC: Dpc = Dpc::new(|| {
+    DPC_RUNS.fetch_add(1, Ordering::Relaxed);
+});
+
+fn dpc_deferred() -> TestResult {
+    let before = DPC_RUNS.load(Ordering::Relaxed);
+    let old = irql::raise(irql::HIGH_LEVEL);
+    TEST_DPC.queue();
+    TEST_DPC.queue(); // already queued: must not run twice
+    clock::busy_wait_us(500);
+    let early = DPC_RUNS.load(Ordering::Relaxed) != before;
+    irql::lower(old);
+    ensure!(!early, "DPC ran while IRQL was HIGH");
+    ensure!(DPC_RUNS.load(Ordering::Relaxed) == before + 1, "DPC did not run exactly once after IRQL dropped");
+    Ok(())
+}
+
+fn join(t: &Thread, ms: u64) -> TestResult {
+    ensure!(t.terminated.wait(Some(ms)) == WaitStatus::Signaled, "thread '{}' did not finish within {ms} ms", t.name());
+    ensure!(t.state() == ThreadState::Terminated, "thread '{}' is {:?}", t.name(), t.state());
+    Ok(())
+}
+
+fn sched_spawn_join() -> TestResult {
+    let value = Arc::new(AtomicU64::new(0));
+    let v = value.clone();
+    let t = sched::spawn("test-join", priority::NORMAL, move || v.store(42, Ordering::Relaxed))?;
+    join(&t, 1000)?;
+    ensure!(value.load(Ordering::Relaxed) == 42, "thread body did not run");
+    ensure!(sched::current_id() != t.id, "thread ids are not unique");
+    Ok(())
+}
+
+fn sched_many_threads() -> TestResult {
+    let counter = Arc::new(AtomicU64::new(0));
+    let mut threads = Vec::new();
+    for _ in 0..16 {
+        let c = counter.clone();
+        threads.push(sched::spawn("test-many", priority::NORMAL, move || {
+            for i in 0..100 {
+                c.fetch_add(1, Ordering::Relaxed);
+                if i % 10 == 0 {
+                    sched::yield_now();
+                }
+            }
+        })?);
+    }
+    for t in &threads {
+        join(t, 5000)?;
+    }
+    ensure!(counter.load(Ordering::Relaxed) == 1600, "counter is {}", counter.load(Ordering::Relaxed));
+    Ok(())
+}
+
+fn sched_time_slicing() -> TestResult {
+    // Two threads that never yield. Without preemptive time slicing the
+    // second one (and this one) would never run again.
+    let stop = Arc::new(AtomicBool::new(false));
+    let counts = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
+    let mut threads = Vec::new();
+    for i in 0..2 {
+        let (stop, counts) = (stop.clone(), counts.clone());
+        threads.push(sched::spawn("test-spin", priority::NORMAL, move || {
+            while !stop.load(Ordering::Relaxed) {
+                counts[i].fetch_add(1, Ordering::Relaxed);
+            }
+        })?);
+    }
+    sched::sleep_ms(100);
+    stop.store(true, Ordering::Relaxed);
+    for t in &threads {
+        join(t, 2000)?;
+    }
+    let (a, b) = (counts[0].load(Ordering::Relaxed), counts[1].load(Ordering::Relaxed));
+    ensure!(a > 0 && b > 0, "spinning threads did not share the CPU ({a} vs {b} iterations)");
+    Ok(())
+}
+
+fn sched_priority_preemption() -> TestResult {
+    let ran = Arc::new(AtomicBool::new(false));
+    let r = ran.clone();
+    let t = sched::spawn("test-high", priority::HIGH, move || r.store(true, Ordering::Relaxed))?;
+    // A higher-priority thread must run immediately (on this or another
+    // processor) without this thread yielding.
+    let deadline = clock::uptime_us() + 5000;
+    while !ran.load(Ordering::Relaxed) && clock::uptime_us() < deadline {
+        core::hint::spin_loop();
+    }
+    ensure!(ran.load(Ordering::Relaxed), "higher-priority thread did not preempt");
+    join(&t, 1000)
+}
+
+fn sched_sleep() -> TestResult {
+    let t0 = clock::uptime_us();
+    sched::sleep_ms(30);
+    let dt = clock::uptime_us() - t0;
+    ensure!(dt >= 30_000, "slept only {dt} us");
+    ensure!(dt < 500_000, "slept {dt} us for a 30 ms sleep");
+    Ok(())
+}
+
+fn sched_stack_reclaimed() -> TestResult {
+    // Check that creating and destroying threads does not leak memory.
+    sched::sleep_ms(5);
+    let (before, _) = pmm::stats();
+    for _ in 0..20 {
+        let t = sched::spawn("test-reap", priority::NORMAL, || {})?;
+        join(&t, 1000)?;
+        drop(t);
+        sched::yield_now();
+    }
+    sched::sleep_ms(5);
+    let (after, _) = pmm::stats();
+    // The pool may keep a few pages for its size classes.
+    ensure!(before.abs_diff(after) <= 8 * PAGE_SIZE, "leaked {} KiB", (before as i64 - after as i64) / 1024);
+    Ok(())
+}
+
+fn sync_event() -> TestResult {
+    let ev = Arc::new(Event::new(false, false));
+    let woke = Arc::new(AtomicU64::new(0));
+    let (e, w) = (ev.clone(), woke.clone());
+    let t = sched::spawn("test-event", priority::NORMAL, move || {
+        if e.wait(Some(2000)) == WaitStatus::Signaled {
+            w.store(1, Ordering::Relaxed);
+        }
+    })?;
+    sched::sleep_ms(20);
+    ensure!(woke.load(Ordering::Relaxed) == 0, "waiter woke before the event was set");
+    ensure!(t.state() == ThreadState::Waiting, "waiter is {:?}, expected Waiting", t.state());
+    ev.set();
+    join(&t, 1000)?;
+    ensure!(woke.load(Ordering::Relaxed) == 1, "waiter was not released by set()");
+    ensure!(!ev.is_set(), "auto-reset event stayed set after releasing a waiter");
+    Ok(())
+}
+
+fn sync_event_timeout() -> TestResult {
+    let ev = Event::new(false, false);
+    let t0 = clock::uptime_us();
+    ensure!(ev.wait(Some(25)) == WaitStatus::Timeout, "wait on an unset event did not time out");
+    let dt = clock::uptime_us() - t0;
+    ensure!(dt >= 25_000, "timed out after only {dt} us");
+    ensure!(ev.wait(Some(0)) == WaitStatus::Timeout, "zero-timeout poll did not report timeout");
+    Ok(())
+}
+
+fn sync_notification_event() -> TestResult {
+    let ev = Arc::new(Event::new(true, false));
+    let released = Arc::new(AtomicU64::new(0));
+    let mut threads = Vec::new();
+    for _ in 0..4 {
+        let (e, r) = (ev.clone(), released.clone());
+        threads.push(sched::spawn("test-notify", priority::NORMAL, move || {
+            if e.wait(Some(2000)) == WaitStatus::Signaled {
+                r.fetch_add(1, Ordering::Relaxed);
+            }
+        })?);
+    }
+    sched::sleep_ms(10);
+    ev.set();
+    for t in &threads {
+        join(t, 1000)?;
+    }
+    ensure!(released.load(Ordering::Relaxed) == 4, "only {} of 4 waiters released", released.load(Ordering::Relaxed));
+    ensure!(ev.is_set(), "manual-reset event reset itself");
+    ev.reset();
+    ensure!(!ev.is_set(), "reset() did not clear the event");
+    Ok(())
+}
+
+struct Guarded {
+    lock: Mutex,
+    value: core::cell::UnsafeCell<u64>,
+}
+
+// SAFETY: `value` is only accessed while holding `lock`.
+unsafe impl Sync for Guarded {}
+unsafe impl Send for Guarded {}
+
+fn sync_mutex() -> TestResult {
+    let shared = Arc::new(Guarded { lock: Mutex::new(), value: core::cell::UnsafeCell::new(0) });
+    let mut threads = Vec::new();
+    for _ in 0..4 {
+        let s = shared.clone();
+        threads.push(sched::spawn("test-mutex", priority::NORMAL, move || {
+            for _ in 0..50 {
+                s.lock.acquire(None);
+                // Read, yield, write: loses updates unless the mutex excludes.
+                // SAFETY: protected by the mutex.
+                let v = unsafe { *s.value.get() };
+                sched::yield_now();
+                unsafe { *s.value.get() = v + 1 };
+                s.lock.release();
+            }
+        })?);
+    }
+    for t in &threads {
+        join(t, 5000)?;
+    }
+    // SAFETY: all writers have finished.
+    let total = unsafe { *shared.value.get() };
+    ensure!(total == 200, "mutex lost updates: {total} != 200");
+    ensure!(shared.lock.acquire(Some(0)) == WaitStatus::Signaled, "first acquire failed");
+    ensure!(shared.lock.acquire(Some(0)) == WaitStatus::Signaled, "recursive acquire failed");
+    shared.lock.release();
+    shared.lock.release();
+    Ok(())
+}
+
+fn sync_semaphore() -> TestResult {
+    let sem = Arc::new(Semaphore::new(0, 10));
+    let consumed = Arc::new(AtomicU64::new(0));
+    let mut threads = Vec::new();
+    for _ in 0..3 {
+        let (s, c) = (sem.clone(), consumed.clone());
+        threads.push(sched::spawn("test-sem", priority::NORMAL, move || {
+            for _ in 0..5 {
+                if s.wait(Some(3000)) == WaitStatus::Signaled {
+                    c.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        })?);
+    }
+    for _ in 0..3 {
+        sem.release(5).map_err(|_| "release(5) failed")?;
+        sched::sleep_ms(5);
+    }
+    for t in &threads {
+        join(t, 5000)?;
+    }
+    ensure!(consumed.load(Ordering::Relaxed) == 15, "consumed {} of 15", consumed.load(Ordering::Relaxed));
+    ensure!(sem.release(11).is_err(), "release beyond the limit succeeded");
+    ensure!(sem.release(10) == Ok(0), "release up to the limit failed");
+    Ok(())
+}
+
+fn online_cpus() -> Vec<u32> {
+    (0..crate::ke::pcr::MAX_CPUS).filter_map(crate::ke::pcr::by_index).map(|p| p.index).collect()
+}
+
+fn smp_processors_online() -> TestResult {
+    let enabled = acpi::get().and_then(|a| a.madt.as_ref()).map_or(1, |m| m.cpus.iter().filter(|c| c.enabled).count());
+    let online = crate::ke::pcr::online_count() as usize;
+    ensure!(online == enabled, "{online} of {enabled} processors online");
+    for p in (0..crate::ke::pcr::MAX_CPUS).filter_map(crate::ke::pcr::by_index) {
+        ensure!(!p.idle_thread.load(Ordering::Relaxed).is_null(), "cpu{} has no idle thread", p.index);
+        ensure!(p.ticks.load(Ordering::Relaxed) > 0, "cpu{} clock is not ticking", p.index);
+    }
+    Ok(())
+}
+
+fn smp_cross_call() -> TestResult {
+    for cpu in online_cpus() {
+        let got = crate::ke::ipi::call_on(cpu, |x| x + crate::ke::pcr::current().index as u64, 1000)
+            .ok_or("processor vanished")?;
+        ensure!(got == 1000 + cpu as u64, "call on cpu{cpu} ran on cpu{}", got.wrapping_sub(1000));
+    }
+    Ok(())
+}
+
+fn smp_tlb_shootdown() -> TestResult {
+    let me = crate::ke::pcr::current().index;
+    let Some(other) = online_cpus().into_iter().find(|&c| c != me) else { return Ok(()) };
+    let va = kva::reserve(1).ok_or("no kernel address space")?;
+    let a = pmm::alloc_zeroed_frame().ok_or("out of frames")?;
+    let b = pmm::alloc_zeroed_frame().ok_or("out of frames")?;
+    // SAFETY: freshly allocated frames, written through the direct map.
+    unsafe {
+        (phys_to_virt(a) as *mut u64).write_volatile(0xAAAA_AAAA);
+        (phys_to_virt(b) as *mut u64).write_volatile(0xBBBB_BBBB);
+    }
+    fn read(va: u64) -> u64 {
+        // SAFETY: the test keeps `va` mapped while the call runs.
+        unsafe { (va as *const u64).read_volatile() }
+    }
+    let flags = paging::WRITABLE | paging::NO_EXECUTE;
+    paging::map_kernel(va, a, flags).map_err(|e| format!("{e:?}"))?;
+    // The other processor now caches va -> a in its TLB.
+    let first = crate::ke::ipi::call_on(other, read, va).ok_or("cross call failed")?;
+    ensure!(first == 0xAAAA_AAAA, "first read saw {first:#x}");
+    // Remapping must not leave a stale translation on the other processor.
+    paging::unmap_kernel(va);
+    paging::map_kernel(va, b, flags).map_err(|e| format!("{e:?}"))?;
+    let second = crate::ke::ipi::call_on(other, read, va).ok_or("cross call failed")?;
+    paging::unmap_kernel(va);
+    pmm::free_frame(a);
+    pmm::free_frame(b);
+    kva::release(va, 1);
+    ensure!(second == 0xBBBB_BBBB, "cpu{other} read a stale mapping ({second:#x})");
+    Ok(())
+}
+
+fn smp_parallel_threads() -> TestResult {
+    let cpus = online_cpus().len();
+    if cpus < 2 {
+        return Ok(());
+    }
+    // Spinning threads at a higher priority than everything else must spread
+    // across processors rather than queue on one. They stop on their own:
+    // as intended, they starve this lower-priority thread while they run.
+    let seen = Arc::new(AtomicU64::new(0));
+    let until = clock::uptime_us() + 50_000;
+    let mut threads = Vec::new();
+    for _ in 0..cpus {
+        let seen = seen.clone();
+        threads.push(sched::spawn("test-parallel", priority::HIGH, move || {
+            while clock::uptime_us() < until {
+                seen.fetch_or(1 << crate::ke::pcr::current().index, Ordering::Relaxed);
+                core::hint::spin_loop();
+            }
+        })?);
+    }
+    for t in &threads {
+        join(t, 2000)?;
+    }
+    let used = seen.load(Ordering::Relaxed).count_ones() as usize;
+    ensure!(used >= 2, "threads ran on only {used} of {cpus} processors");
+    Ok(())
+}
+
+fn init_image() -> Result<&'static [u8], String> {
+    crate::boot_module("init.exe").ok_or_else(|| String::from("boot module init.exe is missing"))
+}
+
+/// Runs init.exe in `mode` and returns its exit status.
+fn run_init(mode: u64) -> Result<i64, String> {
+    let p = crate::ps::process::spawn("init-test", init_image()?, mode)?;
+    ensure!(p.terminated.wait(Some(10_000)) == WaitStatus::Signaled, "process {} did not exit within 10 s", p.id);
+    p.exit_status().ok_or_else(|| String::from("terminated process has no exit status"))
+}
+
+fn pe_rejects_bad_images() -> TestResult {
+    use crate::mm::user::AddressSpace;
+    let space = AddressSpace::new().ok_or("out of memory")?;
+    let image = init_image()?;
+    let cases: [(&str, &[u8]); 4] = [
+        ("empty", &[]),
+        ("garbage", b"this is not an executable at all"),
+        ("truncated", &image[..200.min(image.len())]),
+        ("headers only", &image[..1024.min(image.len())]),
+    ];
+    for (what, data) in cases {
+        ensure!(crate::ps::pe::load(&space, data).is_err(), "loader accepted a {what} image");
+    }
+    let mut corrupted = image.to_vec();
+    corrupted[0x3C] = 0xF0; // e_lfanew points past the end
+    corrupted[0x3D] = 0xFF;
+    ensure!(crate::ps::pe::load(&space, &corrupted).is_err(), "loader accepted a corrupted header");
+    ensure!(space.committed() == 0, "failed loads left memory committed");
+    Ok(())
+}
+
+fn user_init_self_check() -> TestResult {
+    let status = run_init(0)?;
+    ensure!(status == 0, "init self check failed with status {status:#x} (see the log above)");
+    Ok(())
+}
+
+fn user_fault_isolated() -> TestResult {
+    let status = run_init(1)?;
+    ensure!(status == meridian_abi::status::ACCESS_VIOLATION, "expected ACCESS_VIOLATION, got {status:#x}");
+    Ok(())
+}
+
+fn user_privileged_instruction() -> TestResult {
+    let status = run_init(2)?;
+    ensure!(status == meridian_abi::status::PRIVILEGED_INSTRUCTION, "expected PRIVILEGED_INSTRUCTION, got {status:#x}");
+    Ok(())
+}
+
+fn user_kernel_memory_protected() -> TestResult {
+    let status = run_init(3)?;
+    ensure!(status == meridian_abi::status::ACCESS_VIOLATION, "user code read kernel memory (status {status:#x})");
+    Ok(())
+}
+
+fn user_memory_reclaimed() -> TestResult {
+    run_init(0)?;
+    sched::sleep_ms(10);
+    let (before, _) = pmm::stats();
+    for _ in 0..5 {
+        ensure!(run_init(0)? == 0, "init failed");
+    }
+    sched::sleep_ms(10);
+    let (after, _) = pmm::stats();
+    ensure!(before.abs_diff(after) <= 16 * PAGE_SIZE, "processes leaked {} KiB", (before as i64 - after as i64) / 1024);
+    Ok(())
+}
+
+fn ahci_disk_readable() -> TestResult {
+    let disks = crate::io::block::disks();
+    let disk = disks.first().ok_or("no disk was detected")?;
+    ensure!(disk.sector_size() == 512, "unexpected sector size {}", disk.sector_size());
+    ensure!(disk.size_bytes() >= 32 << 20, "disk reports only {} bytes", disk.size_bytes());
+    let mut mbr = alloc::vec![0u8; 512];
+    disk.read_sectors(0, &mut mbr).map_err(|e| format!("read of LBA 0 failed: {e:?}"))?;
+    ensure!(mbr[510..512] == [0x55, 0xAA], "LBA 0 has no boot signature");
+    ensure!(mbr[446 + 4] == 0xEE, "LBA 0 is not a GPT protective MBR");
+    // A multi-chunk read (larger than the 64 KiB bounce buffer).
+    let mut big = alloc::vec![0u8; 160 * 1024];
+    disk.read_sectors(0, &mut big).map_err(|e| format!("160 KiB read failed: {e:?}"))?;
+    ensure!(big[..512] == mbr[..], "multi-chunk read disagrees with the single-sector read");
+    ensure!(&big[512..520] == b"EFI PART", "LBA 1 is not a GPT header");
+    let mut past_end = alloc::vec![0u8; 512];
+    ensure!(disk.read_sectors(disk.sector_count(), &mut past_end).is_err(), "read past the end of the disk succeeded");
+    Ok(())
+}
+
+fn gpt_esp_found() -> TestResult {
+    let parts = crate::io::block::partitions();
+    ensure!(!parts.is_empty(), "no partitions found");
+    ensure!(
+        parts.iter().any(|p| p.description().starts_with("EFI system partition")),
+        "no EFI system partition among {} partition(s)",
+        parts.len()
+    );
+    Ok(())
+}
+
+fn fat_root_listing() -> TestResult {
+    let names: Vec<String> = crate::fs::list("C:\\").map_err(|e| e.message())?.into_iter().map(|e| e.name).collect();
+    for want in ["EFI", "MERIDIAN"] {
+        ensure!(names.iter().any(|n| n == want), "C:\\ lacks {want} (has {names:?})");
+    }
+    let sub: Vec<String> =
+        crate::fs::list("c:/meridian").map_err(|e| e.message())?.into_iter().map(|e| e.name).collect();
+    for want in ["KERNEL.ELF", "INIT.EXE", "CMDLINE.TXT"] {
+        ensure!(sub.iter().any(|n| n == want), "C:\\MERIDIAN lacks {want}");
+    }
+    Ok(())
+}
+
+fn fat_file_matches_module() -> TestResult {
+    let from_disk = crate::fs::read_file("C:\\MERIDIAN\\INIT.EXE").map_err(|e| e.message())?;
+    let module = init_image()?;
+    ensure!(from_disk.len() == module.len(), "size differs: disk {} vs module {}", from_disk.len(), module.len());
+    ensure!(from_disk == module, "INIT.EXE read from disk differs from the boot manager's copy");
+    let cmdline = crate::fs::read_file("C:\\MERIDIAN\\CMDLINE.TXT").map_err(|e| e.message())?;
+    ensure!(cmdline == crate::boot_info().cmdline().as_bytes(), "CMDLINE.TXT differs from the boot command line");
+    Ok(())
+}
+
+fn fat_long_file_name() -> TestResult {
+    let text = crate::fs::read_file("C:\\Welcome to Meridian.txt").map_err(|e| e.message())?;
+    let text = core::str::from_utf8(&text).map_err(|_| "welcome file is not UTF-8")?;
+    ensure!(text.starts_with("Welcome to Meridian OS"), "unexpected contents: {:?}", &text[..text.len().min(40)]);
+    // The same file through its generated 8.3 alias.
+    let alias = crate::fs::read_file("C:\\WELCOM~1.TXT").map_err(|e| e.message())?;
+    ensure!(alias == text.as_bytes(), "short-name alias reads different data");
+    Ok(())
+}
+
+fn fat_errors() -> TestResult {
+    use crate::fs::FsError;
+    ensure!(crate::fs::read_file("C:\\nope.txt").err() == Some(FsError::NotFound), "missing file not reported");
+    ensure!(crate::fs::read_file("C:\\MERIDIAN").err() == Some(FsError::IsADirectory), "directory read as a file");
+    ensure!(
+        crate::fs::list("C:\\MERIDIAN\\INIT.EXE").err() == Some(FsError::NotADirectory),
+        "file listed as a directory"
+    );
+    ensure!(crate::fs::read_file("Q:\\x").err() == Some(FsError::NoSuchVolume), "unknown drive accepted");
+    ensure!(crate::fs::read_file("no-drive").err() == Some(FsError::BadPath), "path without a drive accepted");
+    Ok(())
+}
+
+/// The writable test drive (the data disk attached by `mbuild.py test`).
+fn writable_volume() -> Result<Arc<crate::fs::Volume>, String> {
+    crate::fs::volumes()
+        .into_iter()
+        .find(|v| v.fs.writable())
+        .ok_or_else(|| String::from("no writable volume (is the data disk attached?)"))
+}
+
+fn pattern(len: usize, seed: u8) -> Vec<u8> {
+    (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+}
+
+fn fat_write_read_back() -> TestResult {
+    use crate::fs;
+    let v = writable_volume()?;
+    let d = v.letter;
+    let free_before = v.fs.free_bytes();
+    let dir = format!("{d}:\\SelfTest1");
+    fs::create_dir(&dir).map_err(|e| e.message())?;
+    ensure!(fs::create_dir(&dir).err() == Some(fs::FsError::AlreadyExists), "duplicate folder accepted");
+    for (name, len) in [("short.txt", 5usize), ("A long file name, with spaces.dat", 70_000), ("EMPTY.BIN", 0)] {
+        let path = format!("{dir}\\{name}");
+        let data = pattern(len, len as u8);
+        fs::write_file(&path, &data).map_err(|e| format!("write {name}: {}", e.message()))?;
+        let back = fs::read_file(&path).map_err(|e| format!("read {name}: {}", e.message()))?;
+        ensure!(back == data, "{name}: read back {} bytes that differ from the {} written", back.len(), data.len());
+    }
+    // Replace a file with shorter contents; names keep their case.
+    let long = format!("{dir}\\A long file name, with spaces.dat");
+    fs::write_file(&long, b"shorter").map_err(|e| e.message())?;
+    ensure!(fs::read_file(&long).map_err(|e| e.message())? == b"shorter", "overwrite not visible");
+    let names: Vec<String> = fs::list(&dir).map_err(|e| e.message())?.into_iter().map(|e| e.name).collect();
+    ensure!(names.iter().any(|n| n == "short.txt"), "lower-case 8.3 name lost its case: {names:?}");
+    ensure!(names.iter().any(|n| n == "A long file name, with spaces.dat"), "long name missing: {names:?}");
+    for name in ["short.txt", "A long file name, with spaces.dat", "EMPTY.BIN"] {
+        fs::delete(&format!("{dir}\\{name}")).map_err(|e| e.message())?;
+    }
+    fs::delete(&dir).map_err(|e| e.message())?;
+    ensure!(fs::metadata(&dir).err() == Some(fs::FsError::NotFound), "deleted folder still present");
+    ensure!(v.fs.free_bytes() == free_before, "free space {} != {} before the test", v.fs.free_bytes(), free_before);
+    Ok(())
+}
+
+fn fat_rename_move_delete() -> TestResult {
+    use crate::fs::{self, FsError};
+    let v = writable_volume()?;
+    let d = v.letter;
+    let free_before = v.fs.free_bytes();
+    let (a, b) = (format!("{d}:\\SelfTestA"), format!("{d}:\\SelfTestA\\Inner folder"));
+    fs::create_dir(&a).map_err(|e| e.message())?;
+    fs::create_dir(&b).map_err(|e| e.message())?;
+    let data = pattern(3000, 7);
+    fs::write_file(&format!("{a}\\report.txt"), &data).map_err(|e| e.message())?;
+    // Rename in place, then a case-only rename, then a move into a subfolder.
+    fs::rename(&format!("{a}\\report.txt"), &format!("{a}\\Final report.txt")).map_err(|e| e.message())?;
+    ensure!(fs::read_file(&format!("{a}\\report.txt")).err() == Some(FsError::NotFound), "old name survived");
+    fs::rename(&format!("{a}\\Final report.txt"), &format!("{a}\\FINAL REPORT.txt")).map_err(|e| e.message())?;
+    let names: Vec<String> = fs::list(&a).map_err(|e| e.message())?.into_iter().map(|e| e.name).collect();
+    ensure!(names.iter().any(|n| n == "FINAL REPORT.txt"), "case-only rename not applied: {names:?}");
+    fs::rename(&format!("{a}\\FINAL REPORT.txt"), &format!("{b}\\moved.txt")).map_err(|e| e.message())?;
+    ensure!(fs::read_file(&format!("{b}\\moved.txt")).map_err(|e| e.message())? == data, "moved file differs");
+    // Move a folder up a level and check its ".." follows.
+    let c = format!("{d}:\\SelfTestInner");
+    fs::rename(&b, &c).map_err(|e| e.message())?;
+    ensure!(fs::read_file(&format!("{c}\\moved.txt")).map_err(|e| e.message())? == data, "file lost in folder move");
+    ensure!(fs::rename(&a, &format!("{a}\\x")).is_err(), "folder moved into itself");
+    ensure!(fs::delete(&c).err() == Some(FsError::NotEmpty), "non-empty folder deleted");
+    ensure!(fs::rename(&c, &a).err() == Some(FsError::AlreadyExists), "rename over an existing folder");
+    fs::delete(&format!("{c}\\moved.txt")).map_err(|e| e.message())?;
+    fs::delete(&c).map_err(|e| e.message())?;
+    fs::delete(&a).map_err(|e| e.message())?;
+    ensure!(v.fs.free_bytes() == free_before, "free space {} != {} before the test", v.fs.free_bytes(), free_before);
+    Ok(())
+}
+
+fn fat_directory_growth() -> TestResult {
+    use crate::fs;
+    let v = writable_volume()?;
+    let dir = format!("{}:\\SelfTestMany", v.letter);
+    fs::create_dir(&dir).map_err(|e| e.message())?;
+    // Long names take several 32-byte entries each, so 60 of them grow the
+    // folder across many clusters.
+    for i in 0..60 {
+        let path = format!("{dir}\\Document number {i:03} with a long name.txt");
+        fs::write_file(&path, format!("file {i}").as_bytes()).map_err(|e| format!("file {i}: {}", e.message()))?;
+    }
+    let list = fs::list(&dir).map_err(|e| e.message())?;
+    ensure!(list.len() == 60, "listed {} of 60 files", list.len());
+    for i in (0..60).step_by(7) {
+        let path = format!("{dir}\\document NUMBER {i:03} with a long name.txt");
+        let data = fs::read_file(&path).map_err(|e| format!("read {i}: {}", e.message()))?;
+        ensure!(data == format!("file {i}").as_bytes(), "file {i} has the wrong contents");
+    }
+    let shorts: Vec<String> = list.iter().map(|e| e.short_name.clone()).collect();
+    for (i, s) in shorts.iter().enumerate() {
+        ensure!(!shorts[i + 1..].contains(s), "duplicate 8.3 alias {s}");
+    }
+    for e in list {
+        fs::delete(&format!("{dir}\\{}", e.name)).map_err(|e| e.message())?;
+    }
+    fs::delete(&dir).map_err(|e| e.message())?;
+    Ok(())
+}
+
+fn fat_write_protection() -> TestResult {
+    use crate::fs::{self, FsError};
+    let v = writable_volume()?;
+    // The boot disk is not a Meridian data partition: every write is refused.
+    ensure!(fs::write_file("C:\\x.txt", b"x").err() == Some(FsError::ReadOnly), "boot disk accepted a write");
+    ensure!(fs::create_dir("C:\\X").err() == Some(FsError::ReadOnly), "boot disk accepted a folder");
+    ensure!(fs::delete("C:\\Welcome to Meridian.txt").err() == Some(FsError::ReadOnly), "boot disk deletion");
+    let d = v.letter;
+    for bad in ["a:b.txt", "what?.txt", "trailing.", "", "x\\"] {
+        let r = fs::write_file(&format!("{d}:\\{bad}"), b"x");
+        ensure!(r.is_err(), "invalid name {bad:?} accepted");
+    }
+    ensure!(
+        fs::rename(&format!("{d}:\\Documents"), "C:\\Documents").err() == Some(FsError::NotSameDrive),
+        "cross-drive"
+    );
+    Ok(())
+}
+
+fn user_run_from_disk() -> TestResult {
+    let image = crate::fs::read_file("C:\\MERIDIAN\\INIT.EXE").map_err(|e| e.message())?;
+    let p = crate::ps::process::spawn("init-disk", &image, 0)?;
+    ensure!(p.terminated.wait(Some(10_000)) == WaitStatus::Signaled, "process did not exit");
+    ensure!(p.exit_status() == Some(0), "init loaded from disk failed: {:?}", p.exit_status());
+    Ok(())
+}
