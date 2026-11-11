@@ -98,18 +98,36 @@ the kernel shell). When the process exits or crashes, the kernel takes the
 screen and keyboard back. Inside the process:
 
 * `gfx.rs` — canvases, clipping, alpha blending, anti-aliased lines,
-  rounded rectangles, soft shadows;
+  rounded rectangles, soft shadows, scaling, the blur behind "Mica";
 * `font.rs` — a TrueType parser and rasterizer (quadratic outlines,
   signed-area coverage accumulation) with a glyph cache, plus the Spleen
   bitmap font for the Terminal;
-* `ui.rs` — theme colours, vector icons, wallpapers, the pointer;
-* `apps.rs` — File Explorer, Terminal, Notepad, Task Manager, Settings,
-  About, all using real system calls (directory listing, file reading,
-  process creation, thread/process queries, time, power);
-* `main.rs` — window manager, taskbar, Start menu, desktop icons and the
-  compositor: every window has its own surface, damaged screen areas are
-  recomposed into a back buffer and copied to the framebuffer, and the
-  pointer is drawn directly on the framebuffer.
+* `ui.rs` — theme colours (and their settings-file form), vector icons,
+  wallpapers, the pointer;
+* `widgets.rs` — text field and prompt bar; `bmp.rs` — BMP reading/writing;
+* `apps.rs` — what apps share with the shell (the `App` trait, actions
+  such as opening apps, menus and notifications, the clipboard), plus
+  Terminal, Task Manager, Settings and About; `explorer.rs`, `notepad.rs`,
+  `calc.rs`, `paint.rs`, `photos.rs`, `clock.rs`, `games.rs` — the other
+  apps, all using real system calls (files, processes, threads, time,
+  power);
+* `main.rs` — the shell: window manager, taskbar, Start menu, flyouts,
+  menus, notifications, lock screen, desktop icons and the compositor:
+  every window has a title surface and a content surface, damaged screen
+  areas are recomposed into a back buffer and copied to the framebuffer,
+  and the pointer is drawn directly on the framebuffer.
+
+## Storage writes
+
+Writing is opt-in per partition: `io::partition` accepts writes only for
+partitions whose GPT type is Meridian's own data-partition GUID
+(7A3E9C42-5B1D-4E8F-9A6C-3D2B1F0E8C57). No other system creates such
+partitions, so whatever disk Meridian runs on, it cannot modify data that
+belongs to another operating system. The FAT32 driver orders writes so an
+interruption loses at most the operation in progress (data, then cluster
+chain, then directory entry, then freeing old clusters), keeps both FAT
+copies identical, and marks the FSInfo free count as unknown on the first
+write, as the specification allows.
 
 ## Executable format
 

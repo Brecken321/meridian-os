@@ -25,11 +25,13 @@ before starting; update both when a milestone moves.
 
 - `boot/` UEFI boot manager (own UEFI bindings), `shared/bootinfo/` handoff ABI
 - `kernel/src/{arch/x86_64,hal,ke,mm,ob,ps,io,fs,drivers}` + `shell.rs`, `selftest.rs`, `panic.rs`
-- Storage is read-only by design (no write path exists); AHCI in `drivers/ahci.rs`, FAT32 in `fs/fat.rs`
+- Storage writes only on Meridian data partitions (GPT type 7A3E9C42-…, `io::partition::MERIDIAN_DATA_TYPE`); C: stays read-only. AHCI in `drivers/ahci.rs`, FAT32 in `fs/fat.rs`
+- Data disk D: = `build/data.img` (kept between runs, never overwritten by builds; `clean` keeps it). Tests use fresh `build/<command>-data.img` and `tools/fatcheck.py` checks them
 - `run-meridian.cmd` is the one-click way for the user to try a release build; `demo-meridian.cmd` / `mbuild.py demo` types a guided tour into a visible window (steps in `DEMO_STEPS`)
 - Don't rebuild while the user has a Meridian window open: `build/meridian.img` is in use by that VM
 - `shared/abi/` syscall numbers + NTSTATUS; `runtime/rt/` native user runtime (has a heap: `alloc` works); `system/init/` first program
-- `system/desktop/` the desktop (user mode, Rust): `main.rs` window manager/taskbar/Start, `apps.rs` built-in apps, `gfx.rs`, `font.rs` (TrueType), `ui.rs`; started by the kernel from `C:\MERIDIAN\DESKTOP.EXE` unless `nodesktop`
+- `system/desktop/` the desktop (user mode, Rust): `main.rs` shell (windows, taskbar, Start, menus, toasts, lock), `apps.rs` App trait + Terminal/TaskManager/Settings/About, one file per other app, `widgets.rs`, `bmp.rs`, `gfx.rs`, `font.rs` (TrueType), `ui.rs`; started by the kernel from `C:\MERIDIAN\DESKTOP.EXE` unless `nodesktop`
+- Selawik has no glyphs for many symbols (√ ⌫ − arrows ✓): draw them as vector shapes
 - `exec`/`demo` boot with `nodesktop` (they type into the kernel shell)
 - User programs: PE32+ via `cargo rustc --target x86_64-pc-windows-msvc` + rust-lld (see `USER_PROGRAMS` in mbuild.py)
 - `tools/mbuild.py` build/run/test/screenshot; writes GPT+FAT32 image itself

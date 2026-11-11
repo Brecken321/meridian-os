@@ -38,7 +38,7 @@ Update this file whenever a milestone moves.
 * ⬜ PCIe ECAM, MSI/MSI-X, interrupt-driven I/O
 * ✅ Storage: AHCI SATA (read-only, polled); ⬜ NVMe, virtio-blk, writes
 * ✅ Partitions: GPT and MBR primary entries
-* ✅ Volumes with drive letters; FAT32 read-only with long file names; ⬜ FAT write, FAT12/16, exFAT; NTFS read-only first
+* ✅ Volumes with drive letters; FAT32 with long file names; ✅ FAT32 writes on Meridian data partitions (independently checked by tools/fatcheck.py); ⬜ FAT12/16, exFAT; NTFS read-only first
 * ✅ PS/2 mouse (absolute "vmmouse" mode under hypervisors); CMOS real-time clock
 * ⬜ USB: xHCI, HID keyboard/mouse
 * ⬜ ACPI AML interpreter (evaluate a vetted existing implementation vs. own)
@@ -57,8 +57,8 @@ Update this file whenever a milestone moves.
 * ✅ GOP framebuffer handed to a user-mode program (display ownership, input capture); ⬜ display driver interface; virtio-gpu
 * ✅ Software compositor (damage tracking, shadows, rounded corners) + window manager inside the desktop process; ⬜ window-system protocol so other processes can open windows
 * ✅ TrueType rasterizer and UI drawing in Rust (Selawik font, OFL); light/dark themes, accent colours, wallpapers; ⬜ shared UI toolkit library for other programs; ⬜ saving settings
-* ✅ Desktop shell: taskbar, Start menu with search, Alt+Tab, Alt+F4, desktop icons, power menu; ⬜ tray, notifications, snapping, resizing by the window edges, virtual desktops, lock/login screens
-* ✅ File Explorer, Terminal, Notepad, Task Manager, Settings, About (every control wired to real functionality); ⬜ saving files (needs writable storage)
+* ✅ Desktop shell: Mica taskbar and Start menu (search over apps and files), Alt+Tab, Alt+F4, desktop icons, power menu, notifications, snapping, resizing, right-click menus, calendar flyout, lock screen, Win+key shortcuts, saved settings; ⬜ tray, virtual desktops, login with accounts, animations
+* ✅ File Explorer (file operations), Terminal, Notepad (save), Calculator, Paint, Photos, Clock, Task Manager, Settings, Minesweeper, 2048 (every control wired to real functionality); ⬜ recycle bin, PNG/JPEG, more apps
 
 ## Phase 7 — Windows compatibility ⬜
 
@@ -97,14 +97,14 @@ Update this file whenever a milestone moves.
 
 ## Next session starts here
 
-1. Desktop polish: resize windows by their edges, window snapping, keyboard
-   focus inside apps (Tab), a scroll bar in Explorer and Notepad.
-2. A window-system protocol (shared-memory surfaces + an event channel) so
+1. A window-system protocol (shared-memory surfaces + an event channel) so
    programs other than the built-in apps can open windows; then move the
-   UI drawing code into a shared library.
-3. User-mode thread creation and multi-threaded process termination.
-4. PE imports (a native `msys.dll` loaded from `C:\MERIDIAN`), which is
+   UI drawing code into a shared library and the apps into their own
+   processes.
+2. User-mode thread creation and multi-threaded process termination.
+3. PE imports (a native `msys.dll` loaded from `C:\MERIDIAN`), which is
    also the first step towards loading Win32 DLLs.
-5. Writable storage (FAT32 writes on a separate test disk image first) so
-   Notepad and Settings can save; then MSI interrupts for AHCI, NVMe and USB
-   (xHCI + HID + mass storage) to reach real hardware.
+4. Recycle bin, PNG/JPEG decoding, file handles (open/read/write ranges)
+   instead of whole-file calls.
+5. MSI interrupts for AHCI, NVMe and USB (xHCI + HID + mass storage) to
+   reach real hardware.

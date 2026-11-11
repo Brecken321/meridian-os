@@ -322,17 +322,21 @@ WELCOME_TEXT = """Welcome to Meridian OS!
 
 You are reading this file from the boot disk through Meridian's own AHCI
 disk driver, GPT partition reader and FAT32 file system (with long file
-names), all written from scratch for this kernel. Storage is read-only for
-now, so nothing here can change a disk.
+names), all written from scratch for this kernel. This boot drive (C:) is
+read-only; your own files go on drive D:, Meridian's data drive.
 
 Things to try on the desktop:
   - Open Start (the taskbar button or the Windows key) and type to search.
-  - File Explorer: browse C:\\ and open files and programs.
-  - Terminal: dir, type, ps, threads, mem, run C:\\MERIDIAN\\INIT.EXE
-  - Task Manager: live processes, kernel threads and processor use.
-  - Settings: dark or light mode, accent colour, wallpaper, taskbar alignment.
-  - Drag a window by its title bar; double-click the title bar to maximise.
-  - Alt+Tab switches windows, Alt+F4 closes one.
+  - Notepad: write something and press Ctrl+S to save it in D:\\Documents.
+  - Paint: draw a picture and save it; Photos shows it in its gallery.
+  - File Explorer: new folders, rename (F2), copy and paste, delete.
+  - Right-click the desktop, a file, a taskbar button or a title bar.
+  - Drag a window to the left or right edge of the screen to snap it, or
+    use Windows key + arrow keys. Drag an edge to resize.
+  - Click the clock for the calendar; Windows key + L locks the screen.
+  - Terminal: help, dir, mkdir, copy, move, del, drives, ps, threads, mem
+  - Calculator, Clock (stopwatch and timer), Minesweeper and 2048.
+  - Settings: dark or light mode, accent colour, wallpaper (saved on D:).
   - Start > Power shuts Meridian down or restarts it.
 
 In the kernel's text shell (boot with "nodesktop", or type in the serial

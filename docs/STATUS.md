@@ -52,28 +52,56 @@ the self tests or was verified manually in QEMU as noted.
 * Desktop (`system/desktop`, a user-mode PE32+ program started at boot from
   `C:\MERIDIAN\DESKTOP.EXE`): it takes over the screen, keyboard and mouse
   and draws everything itself (software compositor with damage tracking,
-  TrueType text, rounded corners and shadows). Working: window manager
-  (focus, z-order, drag, minimise/maximise/close, double-click title to
-  maximise, Alt+Tab, Alt+F4), taskbar with pinned and running apps and a
-  live clock, Start menu with search, pinned apps, recommended files from
-  the disk and Shut down/Restart, desktop icons, mouse wheel scrolling. Apps:
-  File Explorer (drives, folders, opening text files and programs), Terminal
-  (dir, cd, type, run, ps, threads, mem, date, ...), Notepad (opens text
-  files; edits stay in memory because storage is read-only), Task Manager
-  (processes, live CPU graph and memory, kernel threads), Settings (light/dark
-  mode, accent colour, wallpaper, taskbar alignment; not saved across
-  restarts) and About. Verified by the `ui` walk-through in CI. When the
-  desktop exits, the kernel console takes the screen back.
+  TrueType text, rounded corners, shadows, and a "Mica" material: the
+  taskbar, Start menu, flyouts, menus and the focused title bar are drawn
+  over a blurred copy of the wallpaper). Shell: window manager (focus,
+  z-order, drag, resize from any edge or corner, minimise/maximise/close,
+  double-click title to maximise, snap to the left/right half or maximise by
+  dragging to a screen edge, Win+arrows, Alt+Tab, Alt+F4), taskbar with
+  pinned and running apps, tooltips, a live clock with a calendar flyout and
+  a Show desktop button; Start menu with search over apps and files,
+  pinned apps, recommended files and Lock/Restart/Shut down; desktop icons
+  including the files in `D:\Desktop`; right-click menus on the desktop,
+  icons, taskbar buttons, title bars and inside apps; notifications; a lock
+  screen (Win+L; there are no accounts, so no password); keyboard shortcuts
+  Win, Win+D/E/R/L/I, Ctrl+Shift+Esc; settings saved in
+  `D:\Meridian\settings.ini`.
+* Desktop apps (all using real system calls): File Explorer (quick access,
+  drives with free space, folders, open with the right app, new
+  folder/file, cut/copy/paste including whole folders, rename in place,
+  delete with confirmation, back/forward/up, type-to-select), Notepad
+  (open, save, save as, selection with mouse and keyboard, clipboard,
+  undo, time/date, zoom, keeps CRLF or LF, asks to save on close), Terminal
+  (dir, cd, type, mkdir, del, rmdir, copy, move, ren, `echo text > file`,
+  drives, run, open, starting apps, ps, threads, mem, uptime, date; command
+  history and paste), Calculator (standard operations, percent, square,
+  square root, reciprocal, history, keyboard input), Paint (pencil, brush,
+  eraser, line, rectangle, ellipse, fill, colour picker, 20-colour palette,
+  sizes, undo/redo, open and save 24-bit BMP), Photos (gallery of a folder,
+  viewer with next/previous, fit/actual size, Edit in Paint), Clock (analog
+  and digital clock, stopwatch with laps, countdown timer with a
+  notification), Task Manager (processes, live CPU graph and memory, kernel
+  threads), Settings (light/dark mode, accent colour, wallpaper, taskbar
+  alignment, drive usage, system information), Minesweeper (three levels,
+  flags, chording) and 2048. Verified by the `ui` walk-through in CI. When
+  the desktop exits, the kernel console takes the screen back.
 * PE32+ loader: header validation, section mapping with per-section
   protections, DIR64 base relocations (images are loaded 256 MiB above their
   preferred base, so relocation is always exercised), stack sizing.
 * Native runtime (`runtime/rt`) and the first program `init.exe`
   (`system/init`), read from `C:\MERIDIAN\INIT.EXE` and run at every boot
   (the boot manager's copy is the fallback).
-* Storage (read-only by design): AHCI SATA driver (IDENTIFY, 48-bit DMA
-  reads through a 64 KiB bounce buffer, polled completion, BIOS/OS handoff),
-  GPT and MBR partition discovery, FAT32 file system with long file names,
-  short-name aliases and corruption checks, drive letters from `C:`.
+* Storage: AHCI SATA driver (IDENTIFY, 48-bit DMA reads and writes through
+  a 64 KiB bounce buffer, cache flush, polled completion, BIOS/OS handoff),
+  GPT and MBR partition discovery, FAT32 with long file names, short-name
+  aliases and corruption checks, drive letters from `C:`. Writing (create,
+  replace, delete, rename/move, folders) is allowed only on partitions with
+  Meridian's own data-partition type GUID, so a disk prepared by another
+  operating system is never modified; the boot drive `C:` stays read-only.
+  The build attaches such a data disk as `D:` (`build/data.img`, kept
+  between runs). After every test run, `tools/fatcheck.py` checks the data
+  disk independently (FAT copies, chains, cross-links, lost clusters, long
+  names, "." and "..").
 * Kernel shell: help, ver, cpu, mem, acpi, pci, irq, threads, ps, run, disks,
   vol, dir, type, uptime, log, clear, selftest, reboot, shutdown, crash.
 * Build: reproducible GPT/FAT32 image writer, QEMU runner, self-test harness,
@@ -85,10 +113,10 @@ the self tests or was verified manually in QEMU as noted.
 ## Not implemented yet
 
 Multi-threaded user processes, object namespace and access checks, PE
-imports/TLS, writing to disks, NVMe, NTFS, USB, networking, audio, GPU
-acceleration, Windows compatibility (Win32), windows for programs other than
-the built-in apps, saving settings, user accounts, installer. See
-[ROADMAP.md](ROADMAP.md).
+imports/TLS, NTFS, NVMe, USB, networking, audio, GPU acceleration, Windows
+compatibility (Win32), windows for programs other than the built-in apps,
+user accounts and passwords, a recycle bin, PNG/JPEG images, installer.
+See [ROADMAP.md](ROADMAP.md).
 
 ## Known limitations
 
@@ -105,9 +133,15 @@ the built-in apps, saving settings, user accounts, installer. See
   driver.
 * Without the vmmouse protocol (real hardware, or `novmmouse`), the PS/2
   mouse is relative and has no wheel.
-* Storage is read-only and polled (no AHCI interrupts or command queuing);
-  only FAT32 is recognised, so the EFI system partition becomes `C:`;
-  optical drives are skipped.
+* Storage is polled (no AHCI interrupts or command queuing); only FAT32 is
+  recognised, so the EFI system partition becomes `C:`; only Meridian data
+  partitions are writable (by design); files are read and written whole
+  (64 MiB per write, 256 MiB per read); optical drives are skipped.
+* Deleting is permanent (there is no recycle bin yet); Explorer asks first.
+* Paint saves and Photos opens 24-bit BMP only (no PNG/JPEG decoder yet).
+* Under QEMU on Windows, guest timer interrupts arrive at the host's timer
+  resolution (15.6 ms unless another program raises it), so short timeouts
+  are coarse; the kernel's clock and the desktop cope with late ticks.
 * Every TLB shootdown interrupts all other processors (no tracking of which
   processors might cache the address).
 * The direct map uses 2 MiB pages across all physical memory below the top of
@@ -145,9 +179,13 @@ None open. Fixed during bring-up (2026-10-31):
 
 ## Failed tests
 
-None. Latest local runs: 48/48 self tests passed (debug and release,
-4 vCPUs); the desktop walk-through (`mbuild.py ui`, 11 steps ending in
-Start > Shut down) passed in debug and release.
+None. Latest local runs (2026-11-10): 52/52 self tests passed (debug and
+release, 4 vCPUs) with the test data disk consistent afterwards; the
+desktop walk-through (`mbuild.py ui`, 15 steps through every major app,
+ending in Start > Power > Shut down) passed with the absolute and the
+relative pointer. The clock test was widened from 50 ms to 200 ms after it
+failed on a Windows host at the default 15.6 ms timer resolution (the
+previous commit failed the same way on the same host).
 
 ## Real hardware tested
 

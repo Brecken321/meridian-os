@@ -10,9 +10,11 @@ telemetry.
 It is **not** a Linux distribution, not a Windows derivative and not a themed
 desktop on top of another OS. Every line of the kernel is original.
 
-![The Meridian desktop in QEMU: File Explorer and Terminal](docs/images/desktop.png)
+![The Meridian desktop in QEMU: File Explorer and Notepad snapped side by side](docs/images/desktop.png)
 
-## Status: early kernel and first desktop (pre-alpha)
+![The Start menu with search, pinned apps and recommended files](docs/images/start.png)
+
+## Status: early kernel and a working desktop (pre-alpha)
 
 Meridian is at the very beginning of a long road. What exists today, all
 tested on every commit in QEMU with UEFI firmware:
@@ -31,21 +33,24 @@ tested on every commit in QEMU with UEFI firmware:
 | Events, semaphores, mutexes, timed waits, sleep | ✅ working |
 | Multiprocessor: all cores started, IPIs, TLB shootdown, multicore scheduling | ✅ working |
 | User mode: isolated processes, system calls, handles, PE32+ loader | ✅ working (first native program runs) |
-| Storage: AHCI SATA driver, GPT/MBR partitions, FAT32 with long names, drive letters (read-only) | ✅ working |
+| Storage: AHCI SATA driver, GPT/MBR partitions, FAT32 with long names, drive letters | ✅ working |
+| Saving files: FAT32 writes on Meridian's own data partitions (drive D:) | ✅ working (QEMU) |
 | PS/2 mouse (absolute in VMs), real-time clock | ✅ working |
-| Desktop: windows, taskbar, Start menu with search, File Explorer, Terminal, Notepad, Task Manager, Settings | ✅ working (QEMU) |
-| Writable storage, NTFS, NVMe, USB | 🚧 next |
+| Desktop: Mica taskbar and Start menu with search, resizable and snappable windows, right-click menus, notifications, calendar, lock screen | ✅ working (QEMU) |
+| Apps: File Explorer, Notepad, Terminal, Calculator, Paint, Photos, Clock, Task Manager, Settings, Minesweeper, 2048 | ✅ working (QEMU) |
+| NTFS, NVMe, USB | 🚧 next |
 | Win32 subsystem, windows for other programs, networking, GPU… | 📋 planned |
 
 At every boot the kernel runs `init.exe` and then the desktop
 (`DESKTOP.EXE`), both PE32+ programs read from the boot disk and running in
 ring 3; a program that crashes is terminated without affecting the kernel.
-The desktop is real, not a mock-up: the File Explorer lists the actual disk,
-Task Manager shows the kernel's live threads and processor use, Settings
-changes the theme, and Start > Power shuts the machine down. Its apps are
-built into the desktop program for now. Nothing runs Windows applications
-yet (the Win32 subsystem does not exist), files cannot be saved (storage is
-read-only), and no real hardware has been tested yet. See [docs/STATUS.md](docs/STATUS.md) for the
+The desktop is real, not a mock-up: File Explorer works on the actual
+disks, Notepad and Paint save to drive D:, Task Manager shows the kernel's
+live threads and processor use, Settings are remembered, and Start > Power
+shuts the machine down. Its apps are built into the desktop program for
+now. Nothing runs Windows applications yet (the Win32 subsystem does not
+exist), and no real hardware has been tested yet. Meridian only ever writes
+to partitions of its own type, so it cannot change another system's disk. See [docs/STATUS.md](docs/STATUS.md) for the
 precise feature list, known bugs and test results, and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
 
@@ -68,9 +73,12 @@ python tools/mbuild.py run --release
 ```
 
 That builds the boot manager, kernel and user programs, writes a bootable
-GPT disk image to `build/meridian.img` and boots it in a QEMU window. Build
-output stays small (under 20 MB in `target/` plus the 48 MB disk image) and
-`python tools/mbuild.py clean` removes all of it. The kernel's own text
+GPT disk image to `build/meridian.img` and boots it in a QEMU window, with a
+second virtual disk, `build/data.img`, as drive D: for your files. The data
+disk is created once and kept between runs and rebuilds (delete it to start
+over). Build output stays small (under 25 MB in `target/` plus the 48 MB
+boot image and 64 MB data disk), and `python tools/mbuild.py clean`
+removes everything except your data disk. The kernel's own text
 shell is still there: type its commands (`help`, `threads`, `cpu`, `mem`,
 `disks`, ...) in the terminal that started QEMU, or boot with
 `--cmdline nodesktop` to get it on screen.

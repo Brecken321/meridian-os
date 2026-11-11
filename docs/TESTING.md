@@ -91,15 +91,22 @@ QEMU + OVMF from apt):
    QEMU's QMP `send-key`) and requires the VM to power itself off through
    ACPI, which exercises the keyboard driver, I/O APIC routing, the shell and
    ACPI S5 end to end
-6. desktop walk-through: `mbuild.py ui --expect-poweroff` boots the desktop
-   and drives it through QMP with the absolute (vmmouse) pointer and the
-   PS/2 keyboard: opens the Start menu, searches, launches Task Manager and
-   its Performance tab, opens the welcome file from a desktop icon, browses
-   `C:\` in File Explorer, runs `dir` in the Terminal, closes it with
-   Alt+F4, switches Settings to light mode, maximises a window and finally
-   clicks Start > Power > Shut down, which must power the VM off. A
-   screenshot of each step goes to `build/ui/`, and the run fails if the
-   kernel log reports a crash
+6. desktop walk-through: `mbuild.py ui --expect-poweroff --cmdline
+   novmmouse` boots the desktop and drives it through QMP with the PS/2
+   mouse and keyboard: Start menu and search, Task Manager, Notepad (types
+   and saves a file to D:), File Explorer, Terminal (`dir`), Calculator,
+   Paint (draws and saves a BMP), Photos (shows it), the calendar, the
+   desktop's right-click menu, the lock screen, and finally Start > Power >
+   Shut down, which must power the VM off. A screenshot of each step goes
+   to `build/ui/`; the run fails if the kernel log reports a crash or if
+   `tools/fatcheck.py` finds the data disk inconsistent. (CI uses the
+   relative pointer because Ubuntu 24.04's QEMU 8.2 misplaces the vmmouse
+   pointer; locally the default is the absolute pointer.)
+
+The self-test run (`mbuild.py test`) also attaches a fresh data disk: four
+FAT write tests create, read back, overwrite, rename, move and delete files
+and folders on it (including 60 long names in one folder), and
+`tools/fatcheck.py` must find it consistent afterwards.
 
 Logs, screenshots and the disk image are uploaded as workflow artifacts.
 
